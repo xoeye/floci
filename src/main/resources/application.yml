@@ -426,6 +426,8 @@ floci:
       # runtime-images:                   # Optional full image references keyed by Lambda runtime
       #   "python3.12": "public.ecr.aws/lambda/python:3.12@sha256:<digest>"
       honour-architectures: false             # Select the Lambda architecture for Docker pull and create
+      layer-volumes-enabled: false            # Mount large layers read-only at /opt from a volume populated once
+      layer-volumes-prefill: false            # Fill layer volumes on create/update and at startup, not on first invoke
       default-memory-mb: 128
       default-timeout-seconds: 3
       # 500 ports, not the former 100 (9200-9299): one port is held per running Lambda

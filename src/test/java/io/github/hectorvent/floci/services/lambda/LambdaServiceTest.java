@@ -1028,6 +1028,42 @@ class LambdaServiceTest {
         assertTrue(error.getMessage().contains("more than the configured 2 entries"));
     }
 
+    private LambdaService serviceWithLayerVolumes(boolean enabled, boolean prefill, WarmPool warmPool) {
+        EmulatorConfig cfg = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig svc = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambdaCfg = mock(EmulatorConfig.LambdaServiceConfig.class);
+        when(cfg.services()).thenReturn(svc);
+        when(svc.lambda()).thenReturn(lambdaCfg);
+        when(lambdaCfg.defaultTimeoutSeconds()).thenReturn(3);
+        when(lambdaCfg.defaultMemoryMb()).thenReturn(128);
+        when(lambdaCfg.zipMaxEntries()).thenReturn(100_000);
+        when(lambdaCfg.layerVolumesEnabled()).thenReturn(enabled);
+        when(lambdaCfg.layerVolumesPrefill()).thenReturn(prefill);
+        return new LambdaService(new LambdaFunctionStore(new InMemoryStorage<String, LambdaFunction>()), warmPool,
+                new CodeStore(Path.of("target/test-data/lambda-code")), new ZipExtractor(), cfg,
+                new RegionResolver(REGION, "000000000000"));
+    }
+
+    @Test
+    void layerVolumePrefill_preparesOnCreateAndConfigurationUpdate() {
+        WarmPool warmPool = mock(WarmPool.class);
+        LambdaService prefilling = serviceWithLayerVolumes(true, true, warmPool);
+
+        prefilling.createFunction(REGION, baseRequest("prefill-fn"));
+        prefilling.updateFunctionConfiguration(REGION, "prefill-fn", Map.of("Timeout", 42));
+
+        verify(warmPool, times(2)).prepare(argThat(fn -> "prefill-fn".equals(fn.getFunctionName())));
+    }
+
+    @Test
+    void layerVolumePrefill_staysOff_unlessBothLayerVolumesAndPrefillAreEnabled() {
+        WarmPool warmPool = mock(WarmPool.class);
+        serviceWithLayerVolumes(true, false, warmPool).createFunction(REGION, baseRequest("no-prefill-fn"));
+        serviceWithLayerVolumes(false, true, warmPool).createFunction(REGION, baseRequest("no-volumes-fn"));
+
+        verify(warmPool, never()).prepare(any());
+    }
+
     @Test
     void createFunctionRejectsOversizedDirectZipUploadWithAwsError() {
         Map<String, Object> request = baseRequest("oversized-zip");

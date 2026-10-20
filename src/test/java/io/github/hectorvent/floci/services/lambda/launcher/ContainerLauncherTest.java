@@ -333,6 +333,56 @@ class ContainerLauncherTest {
                         .filter(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION=")).toList());
     }
 
+    /** Returns the {@code /opt} volume mount on the spec, or null if absent. */
+    private static Mount optVolumeMount(ContainerSpec spec) {
+        if (spec.mounts() == null) {
+            return null;
+        }
+        return spec.mounts().stream()
+                .filter(m -> m.getType() == MountType.VOLUME && "/opt".equals(m.getTarget()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** A published layer version of {@code bytes} bytes, resolvable through the layer service. */
+    private LambdaLayerVersion publishedLayer(String name, long version, int bytes) throws IOException {
+        Path root = Files.createDirectories(tempDir.resolve("layers").resolve(name + "-" + version));
+        Path python = Files.createDirectories(root.resolve("python"));
+        Files.write(python.resolve(name + ".bin"), new byte[bytes]);
+        LambdaLayerVersion layer = new LambdaLayerVersion();
+        layer.setLayerVersionArn("arn:aws:lambda:us-east-1:000000000000:layer:" + name + ":" + version);
+        layer.setCodeSha256(name + "-sha-" + version);
+        layer.setCodeLocalPath(root.toString());
+        lenient().when(layerService.resolveLayerByArn(layer.getLayerVersionArn())).thenReturn(layer);
+        return layer;
+    }
+
+    /** A small Python function listing {@code layers} in order. */
+    private LambdaFunction functionWithLayers(String name, LambdaLayerVersion... layers) throws IOException {
+        Path codePath = Files.createDirectory(tempDir.resolve(name + "-code"));
+        Files.writeString(codePath.resolve("handler.py"), "def handler(event, context):\n    return {}\n");
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName(name);
+        fn.setRuntime("python3.12");
+        fn.setHandler("handler.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setLayers(Stream.of(layers).map(LambdaLayerVersion::getLayerVersionArn).toList());
+        return fn;
+    }
+
+    /** Launches each function with the code-volume threshold at 8 KiB, so small test files cross it. */
+    private void launchWithEightKibThreshold(LambdaFunction... fns) {
+        long original = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 8 * 1024;
+            for (LambdaFunction fn : fns) {
+                launcher.launch(fn);
+            }
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = original;
+        }
+    }
+
     @Test
     void launchFunction_hotReloadMountsTheHostDirectoryReadOnlyAtVarTask() {
         LambdaFunction fn = new LambdaFunction();
@@ -1467,6 +1517,116 @@ class ContainerLauncherTest {
         // Populated twice, once per launch, because the bookkeeping alone is never trusted.
         assertEquals(2, capturedRemotePaths.stream().filter("/var/task"::equals).count(),
                 "each launch should repopulate since Docker never confirms the volume exists");
+    }
+
+    @Test
+    void launchFunction_mountsLargeLayersReadOnlyFromOneVolume_whenLayerVolumesEnabled() throws Exception {
+        when(config.services().lambda().layerVolumesEnabled()).thenReturn(true);
+        // 6 KiB each: neither crosses the 8 KiB threshold alone, together they do.
+        LambdaLayerVersion deps = publishedLayer("deps", 3, 6 * 1024);
+        LambdaLayerVersion shared = publishedLayer("shared", 1, 6 * 1024);
+        LambdaFunction fn = functionWithLayers("layered-fn", deps, shared);
+
+        launchWithEightKibThreshold(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        Mount optMount = optVolumeMount(spec);
+        assertNotNull(optMount, "large layers: /opt should be a named-volume mount");
+        assertTrue(Boolean.TRUE.equals(optMount.getReadOnly()), "/opt volume should be read-only, as on AWS");
+        assertEquals(ContainerLauncher.layerVolumeName(config, List.of(deps, shared)), optMount.getSource());
+        // Both layers are copied once, into the populate helper; none onto the real container.
+        assertEquals(2, capturedRemotePaths.stream().filter("/opt"::equals).count(),
+                "each layer should be copied exactly once, into the populate helper");
+        assertEquals(1, capturedRemotePaths.stream().filter("/var/task"::equals).count(),
+                "small function code is still copied directly");
+        verify(lifecycleManager, times(2)).create(any()); // the populate helper + the real container
+        verify(lifecycleManager, times(1)).stopAndRemove(any(), any()); // the helper only
+    }
+
+    @Test
+    void launchFunction_populatesALayerVolumeOnce_forEveryFunctionListingTheSameLayers() throws Exception {
+        when(config.services().lambda().layerVolumesEnabled()).thenReturn(true);
+        when(lifecycleManager.volumeExists(anyString())).thenReturn(true);
+        LambdaLayerVersion deps = publishedLayer("deps", 3, 16 * 1024);
+        LambdaFunction first = functionWithLayers("first-fn", deps);
+        LambdaFunction second = functionWithLayers("second-fn", deps);
+
+        launchWithEightKibThreshold(first, second, first);
+
+        assertEquals(1, capturedRemotePaths.stream().filter("/opt"::equals).count(),
+                "the layer should be copied once, for the first launch, and mounted by the rest");
+        verify(lifecycleManager, times(4)).create(any()); // one populate helper + three real containers
+    }
+
+    @Test
+    void prepare_populatesTheLayerVolume_soTheFirstLaunchOnlyMountsIt() throws Exception {
+        when(config.services().lambda().layerVolumesEnabled()).thenReturn(true);
+        when(lifecycleManager.volumeExists(anyString())).thenReturn(true);
+        LambdaLayerVersion deps = publishedLayer("deps", 3, 16 * 1024);
+        LambdaFunction fn = functionWithLayers("prefilled-fn", deps);
+
+        long original = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 8 * 1024;
+            launcher.prepare(fn);
+            launcher.prefillExecutor.shutdown();
+            assertTrue(launcher.prefillExecutor.awaitTermination(10, TimeUnit.SECONDS));
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = original;
+        }
+        assertEquals(1, capturedRemotePaths.stream().filter("/opt"::equals).count(),
+                "prepare should copy the layer into the populate helper");
+        verify(lifecycleManager, times(1)).create(any()); // the populate helper only
+
+        launchWithEightKibThreshold(fn);
+
+        assertEquals(ContainerLauncher.layerVolumeName(config, List.of(deps)),
+                optVolumeMount(captureRealContainerSpec()).getSource());
+        assertEquals(1, capturedRemotePaths.stream().filter("/opt"::equals).count(),
+                "the launch should mount the prefilled volume, not copy the layer again");
+    }
+
+    @Test
+    void launchFunction_copiesLayersIntoEveryContainer_whenLayerVolumesDisabled() throws Exception {
+        LambdaLayerVersion deps = publishedLayer("deps", 3, 16 * 1024);
+        LambdaLayerVersion shared = publishedLayer("shared", 1, 16 * 1024);
+        LambdaFunction fn = functionWithLayers("copied-fn", deps, shared);
+
+        launchWithEightKibThreshold(fn);
+
+        assertNull(optVolumeMount(captureRealContainerSpec()), "disabled: /opt must not be a volume");
+        assertEquals(2, capturedRemotePaths.stream().filter("/opt"::equals).count(),
+                "each layer should be copied onto the container");
+        verify(lifecycleManager, times(1)).create(any());
+        verify(lifecycleManager, never()).ensureVolume(any());
+    }
+
+    @Test
+    void launchFunction_copiesLayers_whenHostAwsConfigIsMountedUnderOpt() throws Exception {
+        when(config.services().lambda().layerVolumesEnabled()).thenReturn(true);
+        when(config.services().lambda().awsConfigPath()).thenReturn(Optional.of(tempDir.toString()));
+        LambdaLayerVersion deps = publishedLayer("deps", 3, 16 * 1024);
+        LambdaFunction fn = functionWithLayers("aws-config-fn", deps);
+
+        launchWithEightKibThreshold(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertNull(optVolumeMount(spec), "/opt/aws-config needs a writable /opt to mount into");
+        assertEquals(1, capturedRemotePaths.stream().filter("/opt"::equals).count());
+        verify(lifecycleManager, never()).ensureVolume(any());
+    }
+
+    @Test
+    void launchFunction_copiesLayersBelowTheThreshold_evenWhenLayerVolumesEnabled() throws Exception {
+        when(config.services().lambda().layerVolumesEnabled()).thenReturn(true);
+        LambdaLayerVersion small = publishedLayer("small", 1, 1024);
+        LambdaFunction fn = functionWithLayers("small-layer-fn", small);
+
+        launchWithEightKibThreshold(fn);
+
+        assertNull(optVolumeMount(captureRealContainerSpec()), "a small layer keeps the direct copy");
+        assertEquals(1, capturedRemotePaths.stream().filter("/opt"::equals).count());
+        verify(lifecycleManager, never()).ensureVolume(any());
     }
 
     @Test

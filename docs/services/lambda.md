@@ -556,6 +556,8 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove containers after each invocation |
 | `FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES` | `false` | Select each function's declared architecture for Docker image pulls and containers |
+| `FLOCI_SERVICES_LAMBDA_LAYER_VOLUMES_ENABLED` | `false` | Mount large layers read-only at `/opt` from a volume populated once, instead of copying them into every container |
+| `FLOCI_SERVICES_LAMBDA_LAYER_VOLUMES_PREFILL` | `false` | With layer volumes enabled, fill them in the background on `CreateFunction`, `UpdateFunctionConfiguration` and at startup, instead of on the first cold start |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default function memory (MB) |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default function timeout (seconds) |
 | `FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_ENABLED` | `true` | Fire durable execution timers (waits, step retries, execution timeouts, retention expiry) |
@@ -619,6 +621,14 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
     The temporary copy helper is removed without a stop grace period once copying
     finishes or fails. It runs no Lambda code; actual execution environments retain
     their normal shutdown and extension-drain behavior.
+    Layers are copied into `/opt` on every cold start. With
+    `FLOCI_SERVICES_LAMBDA_LAYER_VOLUMES_ENABLED=true`, layers totalling at least 32 MB are
+    populated once into a read-only volume and mounted at `/opt`. Functions listing the same
+    layer versions in the same order share the volume. `/opt` is then read-only, as on AWS.
+    Functions using `aws-config-path` still get a copy, because that mount lives under `/opt`.
+    With `FLOCI_SERVICES_LAMBDA_LAYER_VOLUMES_PREFILL=true`, the volume is filled in the background
+    when the function is created or reconfigured, and at startup for existing functions. An
+    invocation that arrives during the fill waits for it.
 
 !!! note "Bounding warm containers"
     After an invocation the container stays warm so the next call skips the cold start, and is

@@ -499,6 +499,12 @@ public class WarmPool implements ContainerTeardown, Resettable {
             provisioned.validateReservation(fn, reserved);
         }
     }
+    /** Lets the launcher prepare what {@code fn}'s cold starts will reuse. */
+    public void prepare(LambdaFunction fn) {
+        if (lambdaRuntimeLauncher != null) {
+            lambdaRuntimeLauncher.prepare(fn);
+        }
+    }
 
     /**
      * Stops and removes warm containers for one immutable execution environment, such as

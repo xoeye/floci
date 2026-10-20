@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.lambda.launcher;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
@@ -123,6 +125,47 @@ class ContainerLauncherNamePrefixTest {
         String b = ContainerLauncher.codeVolumeName(config(null, "ci-code-foo"), bar);
 
         assertNotEquals(a, b, "two namespaces must never spell the same code volume name");
+    }
+
+    @Test
+    void layerVolumeNameIsContentAddressedOverTheOrderedLayers() {
+        EmulatorConfig config = config(null, null);
+        LambdaLayerVersion deps = layer("deps", 3, "sha-deps");
+        LambdaLayerVersion shared = layer("shared", 1, "sha-shared");
+
+        String name = ContainerLauncher.layerVolumeName(config, List.of(deps, shared));
+
+        assertEquals(name, ContainerLauncher.layerVolumeName(config,
+                List.of(layer("deps", 3, "sha-deps"), layer("shared", 1, "sha-shared"))));
+        assertNotEquals(name, ContainerLauncher.layerVolumeName(config, List.of(shared, deps)),
+                "/opt merges layers in order, so the order is part of the volume's content");
+        assertNotEquals(name, ContainerLauncher.layerVolumeName(config,
+                        List.of(layer("deps", 3, "sha-republished"), shared)),
+                "a version ARN reused for different content must not mount the old content");
+        assertNotEquals(ContainerLauncher.layerVolumeName(config(null, "ci1"), List.of(deps)),
+                ContainerLauncher.layerVolumeName(config(null, "ci2"), List.of(deps)),
+                "two namespaced instances must not share a layer volume");
+        assertTrue(name.startsWith(ContainerLauncher.codeVolumeNamePrefix(config)),
+                "shares the code-volume prefix, so completion markers are pruned with the same rules");
+        assertTrue(DOCKER_NAME.matcher(name).matches(), "must be a docker-volume-safe name, was: " + name);
+    }
+
+    @Test
+    void layerVolumeNameCannotBeSpelledByAFunctionNamedLayers() {
+        EmulatorConfig config = config(null, null);
+        String layerVolume = ContainerLauncher.layerVolumeName(config, List.of(layer("deps", 3, "sha-deps")));
+        LambdaFunction lookalike = fn();
+        lookalike.setFunctionName("layers");
+        lookalike.setCodeSha256(layerVolume.substring(layerVolume.lastIndexOf('-') + 1));
+
+        assertNotEquals(layerVolume, ContainerLauncher.codeVolumeName(config, lookalike));
+    }
+
+    private static LambdaLayerVersion layer(String name, long version, String codeSha256) {
+        LambdaLayerVersion layer = new LambdaLayerVersion();
+        layer.setLayerVersionArn("arn:aws:lambda:us-east-1:000000000000:layer:" + name + ":" + version);
+        layer.setCodeSha256(codeSha256);
+        return layer;
     }
 
     private static LambdaFunction fn() {
