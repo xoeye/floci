@@ -285,8 +285,10 @@ class ContainerLauncherCodeVolumeReuseTest {
                 mock(EcrRegistryManager.class), mock(LambdaLayerService.class),
                 mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class));
 
+        LambdaFunction function = fn("sha");
+        function.setCodeLocalPath("/app/data/lambda-code/orders");
         assertThrows(IllegalStateException.class,
-                () -> real.populateCodeVolume("vol", fn("sha"), "img"));
+                () -> real.populateCodeVolume("vol", function, "img"));
 
         ArgumentCaptor<String> name = ArgumentCaptor.forClass(String.class);
         verify(builder).withName(name.capture());

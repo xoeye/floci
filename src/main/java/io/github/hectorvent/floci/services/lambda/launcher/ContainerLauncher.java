@@ -55,6 +55,7 @@ import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
@@ -80,6 +81,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private static final Logger LOG = Logger.getLogger(ContainerLauncher.class);
     private static final String TASK_DIR = "/var/task";
     private static final String RUNTIME_DIR = "/var/runtime";
+    private static final String OPT_DIR = "/opt";
 
     /**
      * Default base prefix for the containers and code volumes Lambda spawns: the prefix this
@@ -160,6 +162,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     @PreDestroy
     void shutdown() {
         volumeCleanupScheduler.shutdownNow();
+        prefillExecutor.shutdownNow();
     }
 
     public ContainerHandle launch(LambdaFunction fn) {
@@ -376,6 +379,12 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             specBuilder.withReadOnlyBind(hostPath, "/opt/aws-config");
         });
 
+        List<LambdaLayerVersion> layers = resolveLayers(fn);
+        boolean useLayerVolume = useLayerVolume(layers);
+        if (useLayerVolume) {
+            specBuilder.withNamedVolume(ensureLayerVolume(fn, layers, image), OPT_DIR, true);
+        }
+
         ContainerSpec spec = specBuilder.build();
 
         // Create container without starting — provided.* runtimes exec
@@ -405,26 +414,16 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
 
         // 3. Copy layer contents into /opt (layers are merged in order)
-        if (fn.getLayers() != null && !fn.getLayers().isEmpty()) {
-            for (String layerArn : fn.getLayers()) {
-                LambdaLayerVersion layer = layerService.resolveLayerByArnForAccount(
-                        layerArn, lambdaAccountId, lambdaRegion);
+        if (!useLayerVolume) {
+            for (LambdaLayerVersion layer : layers) {
                 if (provisioned && (layer == null || layer.getCodeLocalPath() == null
                         || !Files.isDirectory(Path.of(layer.getCodeLocalPath())))) {
                     throw new IllegalStateException("Configured layer is unavailable for provisioned initialization: "
-                            + layerArn);
+                            + layer.getLayerVersionArn());
                 }
-                if (layer != null && layer.getCodeLocalPath() != null) {
-                    Path layerPath = Path.of(layer.getCodeLocalPath());
-                    if (Files.exists(layerPath)) {
-                        copyDirToContainer(dockerClient, containerId, layerPath, "/opt", fn.getFunctionName());
-                        LOG.debugv("Copied layer {0} into container {1} at /opt", layerArn, containerId);
-                    } else {
-                        LOG.warnv("Layer code path not found for {0}: {1}", layerArn, layer.getCodeLocalPath());
-                    }
-                } else {
-                    LOG.warnv("Could not resolve layer ARN: {0} for function {1}", layerArn, fn.getFunctionName());
-                }
+                copyDirToContainer(dockerClient, containerId, Path.of(layer.getCodeLocalPath()), OPT_DIR,
+                        fn.getFunctionName());
+                LOG.debugv("Copied layer {0} into container {1} at /opt", layer.getLayerVersionArn(), containerId);
             }
         }
 
@@ -819,6 +818,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             Executors.newSingleThreadScheduledExecutor(
                     r -> { Thread t = new Thread(r, "floci-code-volume-cleanup"); t.setDaemon(true); return t; });
 
+    /** One fill at a time, so a burst of deploys doesn't take every populate permit. */
+    final ExecutorService prefillExecutor = Executors.newSingleThreadExecutor(
+            r -> { Thread t = new Thread(r, "floci-layer-volume-prefill"); t.setDaemon(true); return t; });
+
     /**
      * Returns the name of a read-only Docker volume holding this function's {@code /var/task} code,
      * populating it once (per code version) on first use. Populating streams the code into a
@@ -991,18 +994,49 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         return count == null ? 0 : count.get();
     }
 
+    /** {@link #ensureCodeVolume} for an ordered set of layer versions, shared and never superseded. */
+    String ensureLayerVolume(LambdaFunction fn, List<LambdaLayerVersion> layers, String image) {
+        String volName = layerVolumeName(config, layers);
+        Object lock = codeVolumeLocks.computeIfAbsent(volName, k -> new Object());
+        synchronized (lock) {
+            if (!(populatedCodeVolumes.contains(volName) && lifecycleManager.volumeExists(volName))) {
+                if (reusePersistedCodeVolumeOrRemoveStaleMarker(volName)) {
+                    LOG.infov("Reusing layer volume {0} populated by a previous run (marker present)", volName);
+                } else {
+                    long t0 = System.currentTimeMillis();
+                    LOG.infov("Populating layer volume {0} for function {1}", volName, fn.getFunctionName());
+                    populateLayerVolume(volName, fn, layers, image);
+                    writeCodeVolumeMarkerAndPruneOrphans(volName);
+                    LOG.infov("Populated layer volume {0} in {1}ms", volName, System.currentTimeMillis() - t0);
+                }
+                populatedCodeVolumes.add(volName);
+            }
+        }
+        return volName;
+    }
+
     void populateCodeVolume(String volName, LambdaFunction fn, String image) {
+        populateVolume(volName, "codevol-", TASK_DIR, List.of(Path.of(fn.getCodeLocalPath())), fn, image);
+    }
+
+    void populateLayerVolume(String volName, LambdaFunction fn, List<LambdaLayerVersion> layers, String image) {
+        List<Path> layerDirs = layers.stream().map(layer -> Path.of(layer.getCodeLocalPath())).toList();
+        populateVolume(volName, "layervol-", OPT_DIR, layerDirs, fn, image);
+    }
+
+    private void populateVolume(String volName, String helperNameToken, String mountPath, List<Path> sourceDirs,
+                                LambdaFunction fn, String image) {
         lifecycleManager.ensureVolume(volName);
         String shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-        // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
-        // tar-copy the code into it, then discard it — the data persists in the volume.
+        // A minimal helper container (sleep) with the volume mounted read-write at mountPath; we
+        // tar-copy the sources into it, then discard it — the data persists in the volume.
         ContainerBuilder.Builder helperBuilder = containerBuilder.newContainer(image)
                 .withName(ContainerStorageHelper.prefixedDockerName(config, resolveContainerNamePrefix(config),
-                        "codevol-" + fn.getFunctionName() + "-" + shortId))
+                        helperNameToken + fn.getFunctionName() + "-" + shortId))
                 .withEnv(List.of())
                 .withEntrypoint(List.of("sleep"))
                 .withCmd(List.of("3600"))
-                .withNamedVolume(volName, TASK_DIR, false);
+                .withNamedVolume(volName, mountPath, false);
         ContainerSpec helperSpec = helperBuilder.build();
         // Gate the heavy work (helper create + ~90MB tar copy) so a burst of first-time populates
         // doesn't thrash the Docker daemon. Only populates are serialized — plain cold starts aren't.
@@ -1011,15 +1045,17 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         try {
             helperId = createContainer(helperSpec, fn, configuredDockerFlags());
             lifecycleManager.startCreated(helperId, helperSpec);
-            copyDirToContainerStrict(lifecycleManager.getDockerClient(), helperId,
-                    Path.of(fn.getCodeLocalPath()), TASK_DIR, fn.getFunctionName());
+            for (Path sourceDir : sourceDirs) {
+                copyDirToContainerStrict(lifecycleManager.getDockerClient(), helperId, sourceDir, mountPath,
+                        fn.getFunctionName());
+            }
         } finally {
             if (helperId != null) {
                 try {
                     // This helper only sleeps while the copy runs; it has no runtime to drain.
                     lifecycleManager.stopAndRemove(helperId, null, 0);
                 } catch (Exception e) {
-                    LOG.warnv("Could not remove code-volume helper {0}: {1}", helperId, e.getMessage());
+                    LOG.warnv("Could not remove volume populate helper {0}: {1}", helperId, e.getMessage());
                 }
             }
             populateSemaphore.release();
@@ -1143,20 +1179,27 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      * caller falls back to the direct per-container copy.
      */
     static boolean shouldUseCodeVolume(Path codeDir) {
+        return shouldUseCodeVolume(List.of(codeDir));
+    }
+
+    /** {@link #shouldUseCodeVolume(Path)} for the combined size of several directories. */
+    static boolean shouldUseCodeVolume(List<Path> dirs) {
         final long threshold = CODE_VOLUME_MIN_BYTES;
-        final long[] total = {0L};
-        try (Stream<Path> stream = Files.walk(codeDir)) {
-            for (Path path : (Iterable<Path>) stream::iterator) {
-                if (Files.isRegularFile(path)) {
-                    total[0] += Files.size(path);
-                    if (total[0] >= threshold) {
-                        return true;
+        long total = 0L;
+        for (Path dir : dirs) {
+            try (Stream<Path> stream = Files.walk(dir)) {
+                for (Path path : (Iterable<Path>) stream::iterator) {
+                    if (Files.isRegularFile(path)) {
+                        total += Files.size(path);
+                        if (total >= threshold) {
+                            return true;
+                        }
                     }
                 }
+            } catch (IOException | RuntimeException e) {
+                LOG.debugv("Could not size code dir {0} ({1}); using direct copy", dir, e.getMessage());
+                return false;
             }
-        } catch (IOException | RuntimeException e) {
-            LOG.debugv("Could not size code dir {0} ({1}); using direct copy", codeDir, e.getMessage());
-            return false;
         }
         return false;
     }
@@ -1199,6 +1242,65 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     /** Leading part shared by every code volume (and completion marker) this configuration names. */
     static String codeVolumeNamePrefix(EmulatorConfig config) {
         return ContainerStorageHelper.prefixedDockerName(config, resolveContainerNamePrefix(config), "code-");
+    }
+
+    /** Code-volume prefix so marker pruning covers it; a 24-character hash never matches a code volume's 20. */
+    static String layerVolumeName(EmulatorConfig config, List<LambdaLayerVersion> layers) {
+        StringBuilder key = new StringBuilder();
+        for (LambdaLayerVersion layer : layers) {
+            String content = layer.getCodeSha256() == null || layer.getCodeSha256().isBlank()
+                    ? layer.getCreatedDate()
+                    : layer.getCodeSha256();
+            key.append(layer.getLayerVersionArn()).append('|').append(content).append('\n');
+        }
+        return codeVolumeNamePrefix(config) + "layers-" + Digests.sha256Hex(key.toString()).substring(0, 24)
+                + namespaceDisambiguator(config);
+    }
+
+    /** Fills {@code fn}'s layer volume in the background; a launch mid-fill waits on the same lock. */
+    @Override
+    public void prepare(LambdaFunction fn) {
+        if ("Image".equals(fn.getPackageType())) {
+            return;
+        }
+        prefillExecutor.execute(() -> {
+            try {
+                List<LambdaLayerVersion> layers = resolveLayers(fn);
+                if (useLayerVolume(layers)) {
+                    String image = ecrRegistryManager.rewriteImageUri(imageResolver.resolve(fn.getRuntime()));
+                    ensureLayerVolume(fn, layers, image);
+                }
+            } catch (RuntimeException e) {
+                LOG.warnv("Could not prefill the layer volume for function {0}: {1}",
+                        fn.getFunctionName(), e.getMessage());
+            }
+        });
+    }
+
+    /** A read-only /opt has no room for the /opt/aws-config mountpoint, so those functions copy their layers. */
+    private boolean useLayerVolume(List<LambdaLayerVersion> layers) {
+        return config.services().lambda().layerVolumesEnabled()
+                && !layers.isEmpty()
+                && config.services().lambda().awsConfigPath().filter(s -> !s.isBlank()).isEmpty()
+                && shouldUseCodeVolume(layers.stream().map(layer -> Path.of(layer.getCodeLocalPath())).toList());
+    }
+
+    private List<LambdaLayerVersion> resolveLayers(LambdaFunction fn) {
+        List<LambdaLayerVersion> resolved = new ArrayList<>();
+        if (fn.getLayers() == null) {
+            return resolved;
+        }
+        for (String layerArn : fn.getLayers()) {
+            LambdaLayerVersion layer = layerService.resolveLayerByArn(layerArn);
+            if (layer == null || layer.getCodeLocalPath() == null) {
+                LOG.warnv("Could not resolve layer ARN: {0} for function {1}", layerArn, fn.getFunctionName());
+            } else if (!Files.exists(Path.of(layer.getCodeLocalPath()))) {
+                LOG.warnv("Layer code path not found for {0}: {1}", layerArn, layer.getCodeLocalPath());
+            } else {
+                resolved.add(layer);
+            }
+        }
+        return resolved;
     }
 
     private static String codeVolumeSuffix(LambdaFunction fn) {

@@ -671,6 +671,7 @@ public class LambdaService implements ResourceProvider {
 
         functionStore.save(region, fn);
         LOG.infov("Created Lambda function: {0} in region {1}", functionName, region);
+        prefillLayerVolume(fn);
         if (Boolean.TRUE.equals(request.get("Publish"))) {
             return publishVersion(region, functionName, null);
         }
@@ -1160,7 +1161,22 @@ public class LambdaService implements ResourceProvider {
         // LastUpdateStatus reports the last update of either kind, so this one replaces a failed sync's.
         failedReactiveSyncs.remove(fn.getFunctionArn());
         LOG.infov("Updated configuration for function: {0}", functionName);
+        prefillLayerVolume(fn);
         return fn;
+    }
+
+    /** Fills the layer volume of every stored function and version, for {@link LayerVolumePrefillStartup}. */
+    void prefillLayerVolumes() {
+        List<LambdaFunction> functions = functionStore.listAll();
+        LOG.infov("Prefilling layer volumes for {0} function(s) and version(s)", functions.size());
+        functions.forEach(warmPool::prepare);
+    }
+
+    private void prefillLayerVolume(LambdaFunction fn) {
+        if (config != null && config.services().lambda().layerVolumesEnabled()
+                && config.services().lambda().layerVolumesPrefill()) {
+            warmPool.prepare(fn);
+        }
     }
 
     private static int validatedConfigurationInteger(Object value, String field, int minimum, int maximum) {

@@ -23,4 +23,8 @@ public interface LambdaRuntimeLauncher {
     void stop(ContainerHandle handle);
 
     boolean isAlive(ContainerHandle handle);
+
+    /** Prepares what launches of {@code fn} reuse, before its first cold start. */
+    default void prepare(LambdaFunction fn) {
+    }
 }

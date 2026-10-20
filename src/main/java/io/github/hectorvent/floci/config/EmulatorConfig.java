@@ -3105,6 +3105,24 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean honourArchitectures();
 
+        /**
+         * When true, layers totalling at least 32 MiB are mounted read-only at /opt from a shared
+         * volume instead of being copied into every container. Off by default: /opt becomes read-only.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_LAYER_VOLUMES_ENABLED
+         */
+        @WithDefault("false")
+        boolean layerVolumesEnabled();
+
+        /**
+         * When true, layer volumes are filled in the background on create, configuration update and
+         * startup, not on the first cold start.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_LAYER_VOLUMES_PREFILL
+         */
+        @WithDefault("false")
+        boolean layerVolumesPrefill();
+
         @WithDefault("300")
         int containerIdleTimeoutSeconds();
 

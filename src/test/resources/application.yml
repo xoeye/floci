@@ -161,6 +161,8 @@ floci:
       container-drain-timeout-seconds: 15
       docker-flags: ""
       honour-architectures: false
+      layer-volumes-enabled: false
+      layer-volumes-prefill: false
       zip-max-entries: 100000
       async-retry-delay-seconds: 1
       durable-sweep-enabled: true
