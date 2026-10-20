@@ -35,14 +35,15 @@ public class LambdaDurableFunctionInvoker implements DurableFunctionInvoker {
 
     /**
      * Resolves the function again on every invocation. An execution is pinned to a version, and a
-     * {@code $LATEST} execution resumes on whatever code $LATEST holds now, as on AWS.
+     * {@code $LATEST} execution resumes on whatever code $LATEST holds now, as on AWS. The runtime sees the
+     * execution's qualified ARN, since a durable function is only ever invoked qualified.
      */
     @Override
     public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId) {
         LambdaFunction fn = targetResolver.resolveInvokeTargetForAccount(target.accountId(), target.region(),
                 target.functionName(), target.version());
         InvokeResult result = RequestScopes.callAs(target.accountId(),
-                () -> executorService.invoke(fn, payload, InvocationType.RequestResponse, requestId));
+                () -> executorService.invoke(fn, payload, InvocationType.RequestResponse, target.version(), requestId));
         return new DurableInvocationResult(result.getRequestId(), result.getPayload(), result.getFunctionError());
     }
 }

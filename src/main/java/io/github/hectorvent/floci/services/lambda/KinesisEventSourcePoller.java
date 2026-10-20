@@ -173,10 +173,8 @@ public class KinesisEventSourcePoller implements Resettable {
                     String eventJson = buildKinesisEvent(matched, esm, shard.getShardId());
                     InvokeResult invokeResult;
                     try {
-                        String qualifier = LambdaTargetResolver.mappingQualifier(esm);
-                        invokeResult = qualifier == null
-                                ? executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse)
-                                : executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse, 0, qualifier);
+                        invokeResult = executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse,
+                                0, LambdaTargetResolver.mappingQualifier(esm));
                     } catch (AwsException e) {
                         if ("TooManyRequestsException".equals(e.getErrorCode())) {
                             LOG.infov("Kinesis ESM {0}: function {1} throttled, shard iterator not advanced",

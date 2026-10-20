@@ -1262,6 +1262,29 @@ class RuntimeApiServerTest {
         assertEquals("req-not-yet-polling", body.getString("requestId"));
     }
 
+    @Test
+    @Timeout(15)
+    void runtimeAndExtensionsAreToldTheInvokedAliasArn() throws Exception {
+        String aliasArn = "arn:aws:lambda:us-east-1:000000000000:function:test:live";
+        String extensionId = registerExtension("lambda-adapter", "INVOKE");
+        server.enqueue(new PendingInvocation(
+                "req-alias", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                aliasArn, new CompletableFuture<>()));
+
+        HttpResponse<String> next = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> event = httpClient.send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
+                        .header("Lambda-Extension-Identifier", extensionId)
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(aliasArn, next.headers().firstValue("Lambda-Runtime-Invoked-Function-Arn").orElse(null));
+        assertEquals(aliasArn, new JsonObject(event.body()).getString("invokedFunctionArn"));
+    }
+
     /**
      * Case 4 of the #2573 fix: the common warm-container path, where the runtime is already
      * parked on /next and the extension already parked on /event/next when enqueue() runs.

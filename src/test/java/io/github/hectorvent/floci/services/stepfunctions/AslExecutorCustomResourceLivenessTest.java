@@ -23,6 +23,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -64,7 +65,7 @@ class AslExecutorCustomResourceLivenessTest {
         customResourceLiveness = mock(CustomResourceLiveness.class);
 
         when(functionStore.get(REGION, FUNCTION_NAME)).thenReturn(Optional.of(function));
-        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult(200, null, "{}".getBytes(), null, "poll-request"));
 
         executor = AslExecutorFixture.builder()

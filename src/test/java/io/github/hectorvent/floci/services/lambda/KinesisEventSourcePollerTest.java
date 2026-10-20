@@ -209,14 +209,14 @@ class KinesisEventSourcePollerTest {
         stubFunction();
         stubStreamWith(List.of(record("s1", "p1", "{\"type\":\"order\"}"),
                 record("s2", "p2", "{\"type\":\"refund\"}")));
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any())).thenReturn(new InvokeResult());
         EventSourceMapping esm = esm();
 
         poller.pollAndInvoke(esm);
 
         verify(esmStore, timeout(2000)).saveForAccount(eq(ACCOUNT), any());
         assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD));
-        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
@@ -225,13 +225,13 @@ class KinesisEventSourcePollerTest {
         // order (matches) then refund (does not): refund is the newest FETCHED record.
         stubStreamWith(List.of(record("s1", "p1", "{\"type\":\"order\"}"),
                 record("s2", "p2", "{\"type\":\"refund\"}")));
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any())).thenReturn(new InvokeResult());
         EventSourceMapping esm = esm("{\"data\":{\"type\":[\"order\"]}}");
 
         poller.pollAndInvoke(esm);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         JsonNode records = deliveredRecords(payload.getValue());
         assertEquals(1, records.size());
         assertEquals("s1", records.get(0).path("kinesis").path("sequenceNumber").asText());
@@ -256,7 +256,7 @@ class KinesisEventSourcePollerTest {
         verify(esmStore, timeout(2000)).saveForAccount(eq(ACCOUNT), any());
         awaitPollCompletedViaSecondFetch(esm);
         assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD));
-        verify(executorService, never()).invoke(any(), any(), any());
+        verify(executorService, never()).invoke(any(), any(), any(), anyInt(), any());
     }
 
     @Test
@@ -264,13 +264,13 @@ class KinesisEventSourcePollerTest {
         stubFunction();
         stubStreamWith(List.of(record("s1", "p1", "not json at all"),
                 record("s2", "p2", "{\"type\":\"order\"}")));
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any())).thenReturn(new InvokeResult());
         EventSourceMapping esm = esm("{\"data\":{\"type\":[\"order\"]}}");
 
         poller.pollAndInvoke(esm);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         JsonNode records = deliveredRecords(payload.getValue());
         assertEquals(1, records.size());
         assertEquals("s2", records.get(0).path("kinesis").path("sequenceNumber").asText());
@@ -280,13 +280,13 @@ class KinesisEventSourcePollerTest {
     void partitionKeyMetadataPatternMatches() {
         stubFunction();
         stubStreamWith(List.of(record("s1", "pk-1", "{}"), record("s2", "pk-2", "{}")));
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any())).thenReturn(new InvokeResult());
         EventSourceMapping esm = esm("{\"partitionKey\":[\"pk-2\"]}");
 
         poller.pollAndInvoke(esm);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         JsonNode records = deliveredRecords(payload.getValue());
         assertEquals(1, records.size());
         assertEquals("s2", records.get(0).path("kinesis").path("sequenceNumber").asText());
@@ -304,7 +304,7 @@ class KinesisEventSourcePollerTest {
         verify(esmStore, timeout(2000)).saveForAccount(eq(ACCOUNT), any());
         awaitPollCompletedViaSecondFetch(esm);
         assertEquals("s1", esm.getShardSequenceNumbers().get(SHARD));
-        verify(executorService, never()).invoke(any(), any(), any());
+        verify(executorService, never()).invoke(any(), any(), any(), anyInt(), any());
     }
 
     @Test
@@ -313,11 +313,11 @@ class KinesisEventSourcePollerTest {
         stubStreamWith(List.of(record("s1", "p1", "{\"type\":\"order\"}")));
         InvokeResult err = new InvokeResult();
         err.setFunctionError("Unhandled");
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(err);
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any())).thenReturn(err);
         EventSourceMapping esm = esm("{\"data\":{\"type\":[\"order\"]}}");
 
         poller.pollAndInvoke(esm);
-        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any());
         // Barrier: a 2nd poll ran (so poll 1 finished). Since the checkpoint never advanced, both polls
         // re-derive TRIM_HORIZON and fetch the same window.
         awaitPollCompletedViaSecondFetch(esm);
@@ -326,7 +326,7 @@ class KinesisEventSourcePollerTest {
         assertNull(esm.getShardSequenceNumbers().get(SHARD));
         // retry-from-old-checkpoint: both invokes carried the same fetched window.
         ArgumentCaptor<byte[]> cap = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000).atLeast(2)).invoke(any(), cap.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000).atLeast(2)).invoke(any(), cap.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         List<byte[]> payloads = cap.getAllValues();
         assertEquals(new String(payloads.get(0), StandardCharsets.UTF_8),
                 new String(payloads.get(payloads.size() - 1), StandardCharsets.UTF_8));
@@ -338,12 +338,12 @@ class KinesisEventSourcePollerTest {
         stubStreamWith(List.of(record("s1", "p1", "{\"type\":\"order\"}"),
                 record("s2", "p2", "{\"type\":\"refund\"}")));
         // partial match (order) → invoke attempted → throttled → checkpoint must not advance
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenThrow(new AwsException("TooManyRequestsException", "throttled", 429));
         EventSourceMapping esm = esm("{\"data\":{\"type\":[\"order\"]}}");
 
         poller.pollAndInvoke(esm);
-        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any());
         awaitPollCompletedViaSecondFetch(esm);
 
         verify(esmStore, never()).saveForAccount(eq(ACCOUNT), any());
@@ -366,7 +366,7 @@ class KinesisEventSourcePollerTest {
     void reportedFailureCheckpointsBeforeTheLowestFailedRecord() {
         stubFunction();
         stubStreamWith(List.of(record("s1", "p1", "{}"), record("s2", "p2", "{}"), record("s3", "p3", "{}")));
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any())).thenReturn(
                 batchItemFailures("{\"batchItemFailures\":[{\"itemIdentifier\":\"s3\"},{\"itemIdentifier\":\"s2\"}]}"));
         EventSourceMapping esm = reportingEsm();
 
@@ -380,12 +380,12 @@ class KinesisEventSourcePollerTest {
     void reportedFailureOnTheFirstRecordRetriesTheWholeBatch() {
         stubFunction();
         stubStreamWith(List.of(record("s1", "p1", "{}"), record("s2", "p2", "{}")));
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any())).thenReturn(
                 batchItemFailures("{\"batchItemFailures\":[{\"itemIdentifier\":\"s1\"}]}"));
         EventSourceMapping esm = reportingEsm();
 
         poller.pollAndInvoke(esm);
-        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any());
         awaitPollCompletedViaSecondFetch(esm);
 
         verify(esmStore, never()).saveForAccount(eq(ACCOUNT), any());
@@ -396,12 +396,12 @@ class KinesisEventSourcePollerTest {
     void unknownItemIdentifierRetriesTheWholeBatch() {
         stubFunction();
         stubStreamWith(List.of(record("s1", "p1", "{}"), record("s2", "p2", "{}")));
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any())).thenReturn(
                 batchItemFailures("{\"batchItemFailures\":[{\"itemIdentifier\":\"nope\"}]}"));
         EventSourceMapping esm = reportingEsm();
 
         poller.pollAndInvoke(esm);
-        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any());
         awaitPollCompletedViaSecondFetch(esm);
 
         verify(esmStore, never()).saveForAccount(eq(ACCOUNT), any());
@@ -412,7 +412,7 @@ class KinesisEventSourcePollerTest {
     void emptyBatchItemFailuresCheckpointsTheWholeBatch() {
         stubFunction();
         stubStreamWith(List.of(record("s1", "p1", "{}"), record("s2", "p2", "{}")));
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(batchItemFailures("{\"batchItemFailures\":[]}"));
         EventSourceMapping esm = reportingEsm();
 
@@ -426,7 +426,7 @@ class KinesisEventSourcePollerTest {
     void batchItemFailuresAreIgnoredWithoutReportBatchItemFailures() {
         stubFunction();
         stubStreamWith(List.of(record("s1", "p1", "{}"), record("s2", "p2", "{}")));
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any())).thenReturn(
                 batchItemFailures("{\"batchItemFailures\":[{\"itemIdentifier\":\"s1\"}]}"));
         EventSourceMapping esm = esm();
 
@@ -456,14 +456,14 @@ class KinesisEventSourcePollerTest {
                 .thenReturn("iter-0");
         when(kinesisService.getRecordsForAccount(eq(esmAccount), eq("iter-0"), anyInt(), eq(REGION)))
                 .thenReturn(Map.of("Records", List.of(record("s1", "p1", "{\"type\":\"order\"}"))));
-        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse))).thenReturn(new InvokeResult());
+        when(executorService.invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any())).thenReturn(new InvokeResult());
 
         EventSourceMapping esm = esm();
         esm.setAccountId(esmAccount);
 
         poller.pollAndInvoke(esm);
 
-        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(), eq(InvocationType.RequestResponse), anyInt(), any());
         verify(esmStore, timeout(2000)).saveForAccount(eq(esmAccount), any());
         verify(kinesisService, never()).describeStream(anyString(), anyString());
         verify(kinesisService, never()).getShardIterator(anyString(), anyString(), anyString(), any(), anyString());

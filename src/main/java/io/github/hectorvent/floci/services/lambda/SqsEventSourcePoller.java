@@ -266,10 +266,8 @@ public class SqsEventSourcePoller implements Resettable {
                 LOG.infov("ESM {0}: invoking function {1}", esm.getUuid(), fn.getFunctionName());
                 InvokeResult result;
                 try {
-                    String qualifier = LambdaTargetResolver.mappingQualifier(esm);
-                    result = qualifier == null
-                            ? executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse)
-                            : executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse, 0, qualifier);
+                    result = executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse,
+                            0, LambdaTargetResolver.mappingQualifier(esm));
                 } catch (AwsException e) {
                     if ("TooManyRequestsException".equals(e.getErrorCode())) {
                         LOG.infov("ESM {0}: function {1} throttled, messages will return to queue after visibility timeout",

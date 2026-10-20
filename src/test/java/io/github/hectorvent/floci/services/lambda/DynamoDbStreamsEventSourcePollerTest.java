@@ -290,7 +290,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         // stale checkpoint, so it is silently skipped. Resuming from TRIM_HORIZON, where the fix makes
         // the poller restart, delivers the record.
         LambdaFunction fn = stubTrimHorizon(List.of(ddbRecord("000000000000000000001", "INSERT", "{}")));
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult()); // success, no functionError
 
         // Startup invalidates the stale checkpoint...
@@ -301,7 +301,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         poller.pollAndInvoke(esmStore.getForAccount(ACCOUNT_ID, "esm-1").orElseThrow());
 
         verify(executorService, timeout(2000))
-                .invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     // ──────────────────────────── FilterCriteria ────────────────────────────
@@ -451,7 +451,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         stubTrimHorizon(List.of(
                 ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
                 ddbRecord("s2", "INSERT", "{\"status\":{\"S\":\"inactive\"}}")));
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm(PATTERN);
@@ -459,7 +459,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollerWith(store).pollAndInvoke(esm);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         JsonNode records = readRecords(payload.getValue());
         assertEquals(1, records.size());
         assertEquals("s1", records.get(0).path("dynamodb").path("SequenceNumber").asText());
@@ -481,7 +481,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
         awaitPollCompletedViaSecondFetch(p, esm);
         assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD_ID));
-        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+        verify(executorService, never()).invoke(any(), any(byte[].class), any(), anyInt(), any());
     }
 
     @Test
@@ -489,14 +489,14 @@ class DynamoDbStreamsEventSourcePollerTest {
         stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
         InvokeResult err = new InvokeResult();
         err.setFunctionError("Unhandled");
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(err);
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm(PATTERN);
         DynamoDbStreamsEventSourcePoller p = pollerWith(store);
 
         p.pollAndInvoke(esm);
-        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
         advancePastRetry(p);
         awaitPollCompletedViaSecondFetch(p, esm);
 
@@ -504,7 +504,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertNull(esm.getShardSequenceNumbers().get(SHARD_ID));
         // retry-from-old-checkpoint: both polls re-derive TRIM_HORIZON and deliver the same window.
         ArgumentCaptor<byte[]> cap = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000).atLeast(2)).invoke(any(), cap.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000).atLeast(2)).invoke(any(), cap.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         List<byte[]> payloads = cap.getAllValues();
         assertEquals(new String(payloads.get(0)), new String(payloads.get(payloads.size() - 1)));
     }
@@ -514,14 +514,14 @@ class DynamoDbStreamsEventSourcePollerTest {
         stubTrimHorizon(List.of(
                 ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
                 ddbRecord("s2", "MODIFY", "{\"status\":{\"S\":\"inactive\"}}")));
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenThrow(new AwsException("TooManyRequestsException", "throttled", 429));
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm(PATTERN); // s1 matches → invoke attempted → throttled
         DynamoDbStreamsEventSourcePoller p = pollerWith(store);
 
         p.pollAndInvoke(esm);
-        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
         awaitPollCompletedViaSecondFetch(p, esm);
         verify(store, never()).saveForAccount(anyString(), any());
         assertNull(esm.getShardSequenceNumbers().get(SHARD_ID));
@@ -532,7 +532,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         stubTrimHorizon(List.of(
                 ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
                 ddbRecord("s2", "MODIFY", "{\"status\":{\"S\":\"inactive\"}}")));
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm(); // no FilterCriteria
@@ -540,7 +540,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollerWith(store).pollAndInvoke(esm);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         assertEquals(2, readRecords(payload.getValue()).size());
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
         assertEquals("s2", esm.getShardSequenceNumbers().get(SHARD_ID));
@@ -552,7 +552,7 @@ class DynamoDbStreamsEventSourcePollerTest {
                 ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}"),
                 removal("s2", false),
                 removal("s3", true)));
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
         EventSourceMapping esm = filterEsm(
                 "{\"userIdentity\":{\"type\":[\"Service\"],\"principalId\":[\"dynamodb.amazonaws.com\"]}}");
@@ -560,7 +560,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollerWith(mock(EsmStore.class)).pollAndInvoke(esm);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         JsonNode records = readRecords(payload.getValue());
         assertEquals(1, records.size());
         assertEquals("s3", records.get(0).path("dynamodb").path("SequenceNumber").asText());
@@ -593,7 +593,7 @@ class DynamoDbStreamsEventSourcePollerTest {
                 ddbRecord("s3", "INSERT", "{}")));
         InvokeResult result = new InvokeResult();
         result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s3\"},{\"itemIdentifier\":\"s2\"}]}".getBytes());
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(result);
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm();
@@ -613,7 +613,7 @@ class DynamoDbStreamsEventSourcePollerTest {
                 ddbRecord("s2", "INSERT", "{}")));
         InvokeResult result = new InvokeResult();
         result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s1\"}]}".getBytes());
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(result);
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm();
@@ -623,7 +623,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         p.pollAndInvoke(esm);
         verify(executorService, timeout(2000))
-                .invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
         awaitPollCompletedViaSecondFetch(p, esm);
 
         verify(store, never()).saveForAccount(anyString(), any());
@@ -637,7 +637,7 @@ class DynamoDbStreamsEventSourcePollerTest {
                 ddbRecord("s2", "INSERT", "{}")));
         InvokeResult result = new InvokeResult();
         result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"unknown\"}]}".getBytes());
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(result);
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm();
@@ -646,7 +646,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         p.pollAndInvoke(esm);
         verify(executorService, timeout(2000))
-                .invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
         awaitPollCompletedViaSecondFetch(p, esm);
 
         verify(store, never()).saveForAccount(anyString(), any());
@@ -660,7 +660,7 @@ class DynamoDbStreamsEventSourcePollerTest {
                 ddbRecord("s2", "INSERT", "{}")));
         InvokeResult result = new InvokeResult();
         result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s1\"}]}".getBytes());
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(result);
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm();
@@ -688,7 +688,7 @@ class DynamoDbStreamsEventSourcePollerTest {
                 ddbRecord("s4", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
         InvokeResult result = new InvokeResult();
         result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s4\"},{\"itemIdentifier\":\"s3\"}]}".getBytes());
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(result);
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm(PATTERN);
@@ -697,7 +697,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollerWith(store).pollAndInvoke(esm);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         JsonNode records = readRecords(payload.getValue());
         assertEquals(3, records.size(), "only the post-filter records are delivered");
         assertEquals("s1", records.get(0).path("dynamodb").path("SequenceNumber").asText());
@@ -726,7 +726,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         InvokeResult result = new InvokeResult();
         // s2 is in the fetched batch but was never delivered to the function.
         result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s2\"}]}".getBytes());
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(result);
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm(PATTERN);
@@ -736,7 +736,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         p.pollAndInvoke(esm);
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         JsonNode records = readRecords(payload.getValue());
         assertEquals(2, records.size());
         assertEquals("s1", records.get(0).path("dynamodb").path("SequenceNumber").asText());
@@ -758,7 +758,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     void trimmedCheckpointResumesFromTrimHorizonInsteadOfWedging() {
         // The stale checkpoint is older than s9, the oldest record retained, so reading after it is trimmed.
         stubTrimHorizon(List.of(ddbRecord("s9", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
 
         EsmStore store = mock(EsmStore.class);
@@ -768,7 +768,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollerWith(store).pollAndInvoke(esm);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         assertEquals(1, readRecords(payload.getValue()).size());
         verify(store, timeout(2000)).saveForAccount(eq(ACCOUNT_ID), any());
         assertEquals("s9", esm.getShardSequenceNumbers().get(SHARD_ID));
@@ -788,7 +788,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollerWith(store).pollAndInvoke(esm);
         awaitPollCompletedViaSecondFetch(pollerWith(store), esm);
 
-        verify(executorService, never()).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, never()).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
         verify(store, never()).saveForAccount(anyString(), any());
         assertEquals(STALE_CHECKPOINT, esm.getShardSequenceNumbers().get(SHARD_ID));
     }
@@ -801,7 +801,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         err.setStatusCode(200);
         err.setRequestId("req-123");
         err.setExecutedVersion("$LATEST");
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(err);
 
         EsmStore store = mock(EsmStore.class);
@@ -820,7 +820,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         // First poll: attempt 1 (initial failure, retries left)
         p.pollAndInvoke(esm);
         // Verify invoke was called for attempt 1
-        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
         // Wait for poll 1 to finish by ensuring activePolls is released
         long deadline = System.currentTimeMillis() + 3000;
         while (System.currentTimeMillis() < deadline) {
@@ -889,7 +889,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         err.setFunctionError("Unhandled");
         err.setStatusCode(200);
         err.setRequestId("req-s3");
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(err);
 
         EsmStore store = mock(EsmStore.class);
@@ -1001,7 +1001,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         InvokeResult err = new InvokeResult();
         err.setFunctionError("Unhandled");
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(err);
 
         EsmStore store = mock(EsmStore.class);
@@ -1032,7 +1032,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
         InvokeResult err = new InvokeResult();
         err.setFunctionError("Handled");
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(err);
 
         EsmStore store = mock(EsmStore.class);
@@ -1062,7 +1062,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         InvokeResult err = new InvokeResult();
         err.setFunctionError("Unhandled");
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(err);
 
         EsmStore store = mock(EsmStore.class);
@@ -1079,7 +1079,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         DynamoDbStreamsEventSourcePoller p = pollerWith(store);
 
         p.pollAndInvoke(esm);
-        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
 
         long deadline = System.currentTimeMillis() + 3000;
         while (System.currentTimeMillis() < deadline) {
@@ -1116,7 +1116,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         result.setStatusCode(200);
         result.setRequestId("req-batch-fail");
         result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s1\"}]}".getBytes());
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(result);
 
         EsmStore store = mock(EsmStore.class);
@@ -1135,7 +1135,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         // First poll: attempt 1 (initial partial failure, retries left)
         p.pollAndInvoke(esm);
-        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
 
         long deadline = System.currentTimeMillis() + 3000;
         while (System.currentTimeMillis() < deadline) {
@@ -1185,7 +1185,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         InvokeResult partialFailure = new InvokeResult();
         partialFailure.setStatusCode(200);
         partialFailure.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s2\"}]}".getBytes());
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(partialFailure);
 
         EsmStore store = mock(EsmStore.class);
@@ -1222,7 +1222,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals(1, dlqPayload.path("DDBStreamBatchInfo").path("batchSize").asInt());
 
         // Prove there is NO second Lambda invocation for that failed item
-        verify(executorService, times(1)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, times(1)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
@@ -1233,7 +1233,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         InvokeResult partialFailure = new InvokeResult();
         partialFailure.setStatusCode(200);
         partialFailure.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"s2\"}]}".getBytes());
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(partialFailure);
 
         EsmStore store = mock(EsmStore.class);
@@ -1283,7 +1283,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals("s2", dlqPayload.path("DDBStreamBatchInfo").path("endSequenceNumber").asText());
         assertEquals(1, dlqPayload.path("DDBStreamBatchInfo").path("batchSize").asInt());
 
-        verify(executorService, times(2)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, times(2)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
@@ -1291,7 +1291,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{\"status\":{\"S\":\"active\"}}")));
         InvokeResult error = new InvokeResult();
         error.setFunctionError("Unhandled");
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(error);
 
         EventSourceMapping esm = filterEsm();
@@ -1301,11 +1301,11 @@ class DynamoDbStreamsEventSourcePollerTest {
         awaitPollCompleted(p);
         p.pollAndInvoke(esm);
         awaitPollCompleted(p);
-        verify(executorService, times(1)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, times(1)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
 
         advancePastRetry(p);
         p.pollAndInvoke(esm);
-        verify(executorService, timeout(2000).times(2)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000).times(2)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
@@ -1335,7 +1335,7 @@ class DynamoDbStreamsEventSourcePollerTest {
                 clock.get() / 1_000 - 86_401)));
         InvokeResult error = new InvokeResult();
         error.setFunctionError("Unhandled");
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(error);
 
         EventSourceMapping.OnFailure onFailure = new EventSourceMapping.OnFailure();
@@ -1356,7 +1356,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         advancePastRetry(p);
         p.pollAndInvoke(esm);
         verify(executorService, timeout(2000).times(2))
-                .invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
@@ -1365,7 +1365,7 @@ class DynamoDbStreamsEventSourcePollerTest {
                 clock.get() / 1_000 - 61)));
         InvokeResult error = new InvokeResult();
         error.setFunctionError("Unhandled");
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(error);
 
         EventSourceMapping esm = filterEsm();
@@ -1401,7 +1401,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     /** Records the sequences of every delivered batch and answers each with {@code respond}. */
     private List<List<String>> recordInvocations(Function<List<String>, InvokeResult> respond) {
         List<List<String>> invocations = new CopyOnWriteArrayList<>();
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse))).thenAnswer(inv -> {
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any())).thenAnswer(inv -> {
             List<String> seqs = new ArrayList<>();
             readRecords(inv.getArgument(1)).forEach(r -> seqs.add(r.path("dynamodb").path("SequenceNumber").asText()));
             invocations.add(seqs);
@@ -1749,7 +1749,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     private void stubFunctionSucceeds() {
         stubFunction();
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
     }
 
@@ -1773,7 +1773,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     /** Invocation that signals {@code invoking} and then holds until {@code release} opens. */
     private void stubBlockingInvoke(CountDownLatch invoking, CountDownLatch release, InvokeResult result) {
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenAnswer(inv -> {
                     invoking.countDown();
                     release.await(5, TimeUnit.SECONDS);
@@ -1794,7 +1794,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         poller.pollAndInvoke(esm);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         assertEquals(List.of("new"), deliveredKeys(payload.getValue()));
     }
 
@@ -1809,13 +1809,13 @@ class DynamoDbStreamsEventSourcePollerTest {
         poller.pollAndInvoke(esm);
         awaitPollCompleted(poller);
         assertTrue(esm.getShardSequenceNumbers().isEmpty(), "an empty poll must not pin the cursor");
-        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+        verify(executorService, never()).invoke(any(), any(byte[].class), any(), anyInt(), any());
 
         write("first");
         poller.pollAndInvoke(esm);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         assertEquals(List.of("first"), deliveredKeys(payload.getValue()));
     }
 
@@ -1838,7 +1838,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         esmStore.saveForAccount(ACCOUNT_ID, esm);
         write("a");
         poller.pollAndInvoke(esm);
-        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
         awaitPollCompleted(poller);
 
         esm.setEnabled(false);
@@ -1852,7 +1852,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
         verify(executorService, timeout(2000).times(2))
-                .invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+                .invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         assertEquals(List.of("a"), deliveredKeys(payload.getAllValues().get(0)));
         assertEquals(List.of("b"), deliveredKeys(payload.getAllValues().get(1)),
                 "re-enabling resumes after the last processed record, neither from the trim horizon nor LATEST");
@@ -1863,7 +1863,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         CountDownLatch reading = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         stubBlockingRead(reading, release);
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
         EventSourceMapping esm = streamsEsm("esm-live", null);
         esmStore.saveForAccount(ACCOUNT_ID, esm);
@@ -1875,7 +1875,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         release.countDown();
         awaitPollCompleted(poller);
 
-        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+        verify(executorService, never()).invoke(any(), any(byte[].class), any(), anyInt(), any());
         assertTrue(esmStore.getForAccount(ACCOUNT_ID, esm.getUuid()).isEmpty(),
                 "a deleted mapping must not reappear in List/Get");
     }
@@ -1885,7 +1885,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         CountDownLatch reading = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         stubBlockingRead(reading, release);
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
         EventSourceMapping esm = streamsEsm("esm-live", null);
         esmStore.saveForAccount(ACCOUNT_ID, esm);
@@ -1898,7 +1898,7 @@ class DynamoDbStreamsEventSourcePollerTest {
         release.countDown();
         awaitPollCompleted(poller);
 
-        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+        verify(executorService, never()).invoke(any(), any(byte[].class), any(), anyInt(), any());
     }
 
     @Test
@@ -2059,14 +2059,14 @@ class DynamoDbStreamsEventSourcePollerTest {
         EventSourceMapping esm = filterEsm();
         DynamoDbStreamsEventSourcePoller p = pollerWith(store);
         // A delete has stopped the poller but has not reached the store yet, so the mapping still exists.
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenAnswer(inv -> {
                     p.stopPolling(esm.getUuid());
                     return new InvokeResult();
                 });
 
         p.pollAndInvoke(esm);
-        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
         awaitPollCompleted(p);
 
         verify(store, never()).saveForAccount(anyString(), any());
@@ -2075,7 +2075,7 @@ class DynamoDbStreamsEventSourcePollerTest {
     @Test
     void startPollingAfterStopPollingLetsTheCheckpointAdvanceAgain() {
         stubTrimHorizon(List.of(ddbRecord("s1", "INSERT", "{}")));
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
         EsmStore store = mock(EsmStore.class);
         EventSourceMapping esm = filterEsm();
@@ -2203,13 +2203,13 @@ class DynamoDbStreamsEventSourcePollerTest {
                  "StreamViewType": "NEW_AND_OLD_IMAGES"}}""");
         JsonNode original = awsRecord.deepCopy();
         stubTrimHorizon(List.of(new DynamoDbStreamReader.Record("s1", awsRecord)));
-        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
 
         pollOnce(poller, filterEsm());
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService).invoke(any(), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         ObjectNode expected = original.deepCopy();
         expected.put("eventSourceARN", STREAM_ARN);
         ((ObjectNode) expected.get("dynamodb")).put("ApproximateCreationDateTime", 1_700_000_000d);

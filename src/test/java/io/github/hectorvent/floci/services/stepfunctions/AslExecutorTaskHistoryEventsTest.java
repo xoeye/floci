@@ -33,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
@@ -250,7 +251,7 @@ class AslExecutorTaskHistoryEventsTest {
         function.setFunctionArn(functionArn);
 
         when(functionStore.get(REGION, functionName)).thenReturn(Optional.of(function));
-        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenAnswer(invocation -> {
                     JsonNode event = objectMapper.readTree((byte[]) invocation.getArgument(1));
                     byte[] output = objectMapper.writeValueAsBytes(event);
@@ -481,7 +482,7 @@ class AslExecutorTaskHistoryEventsTest {
         function.setFunctionName(functionName);
         function.setFunctionArn(functionArn);
         when(functionStore.get(REGION, functionName)).thenReturn(Optional.of(function));
-        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult(200, "Handled", errorPayload, null, "failure-request"));
     }
 

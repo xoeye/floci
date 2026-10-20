@@ -118,6 +118,18 @@ Use `GetFunctionConcurrency` to read the function-wide reservation separately.
 Deleting the reservation with `DeleteFunctionConcurrency` removes the `Concurrency` member from
 subsequent unqualified `GetFunction` responses.
 
+### Invoked Function ARN
+
+The runtime receives the ARN the function was invoked by in `Lambda-Runtime-Invoked-Function-Arn`
+(`context.invoked_function_arn` in Python, `context.invokedFunctionArn` in Node.js), and extensions
+receive it as the INVOKE event's `invokedFunctionArn`. As on AWS, it keeps the qualifier of the request:
+invoking `my-fn:live` reports `arn:aws:lambda:us-east-1:000000000000:function:my-fn:live`, also when the
+alias routes the call to another version through `AdditionalVersionWeights`, invoking `my-fn:1` reports
+`...:function:my-fn:1`, and an unqualified invoke reports the unqualified ARN. This holds for every caller:
+`Invoke`, asynchronous retries, function URLs, event source mappings whose `FunctionName` names an alias
+or version, and service integrations that target a qualified ARN. Containers are still kept per version,
+so two aliases of the same version share warm containers.
+
 ### Asynchronous Invocation Retries and Dead-Letter Queues
 
 An asynchronous invocation (`InvocationType: Event`) answers `202` immediately and runs on the background

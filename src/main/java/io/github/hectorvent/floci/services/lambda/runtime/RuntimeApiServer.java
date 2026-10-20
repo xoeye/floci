@@ -784,7 +784,7 @@ public class RuntimeApiServer {
                 return;
             }
             ExtensionEvent event = ExtensionEvent.invoke(
-                    invocation.getRequestId(), invocation.getDeadlineMs(), invocation.getFunctionArn());
+                    invocation.getRequestId(), invocation.getDeadlineMs(), invocation.getInvokedFunctionArn());
             for (RegisteredExtension ext : extensions.values()) {
                 if (!ext.isSubscribedTo(ExtensionEvent.Type.INVOKE)) {
                     continue;
@@ -989,7 +989,7 @@ public class RuntimeApiServer {
                     .setStatusCode(200)
                     .putHeader("Content-Type", "application/json")
                     .putHeader("Lambda-Runtime-Aws-Request-Id", invocation.getRequestId())
-                    .putHeader("Lambda-Runtime-Invoked-Function-Arn", invocation.getFunctionArn())
+                    .putHeader("Lambda-Runtime-Invoked-Function-Arn", invocation.getInvokedFunctionArn())
                     .putHeader("Lambda-Runtime-Deadline-Ms", String.valueOf(invocation.getDeadlineMs()));
             if (invocation.getClientContext() != null) {
                 response.putHeader("Lambda-Runtime-Client-Context", invocation.getClientContext());

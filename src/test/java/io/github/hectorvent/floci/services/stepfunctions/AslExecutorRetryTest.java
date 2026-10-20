@@ -23,6 +23,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -80,7 +81,7 @@ class AslExecutorRetryTest {
 
     @Test
     void retriesUntilTheTaskSucceeds() throws Exception {
-        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult(200, "Handled",
                         "{\"errorType\":\"Boom\"}".getBytes(StandardCharsets.UTF_8), null, "req-1"))
                 .thenReturn(new InvokeResult(200, null,
@@ -108,12 +109,12 @@ class AslExecutorRetryTest {
         assertEquals("SUCCEEDED", execution.getStatus());
         assertTrue(objectMapper.readTree(execution.getOutput()).path("ok").asBoolean());
         verify(lambdaExecutor, times(2))
-                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
     void exhaustedRetriesFailWithOriginalError() {
-        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult(200, "Handled",
                         "{\"errorType\":\"Boom\"}".getBytes(StandardCharsets.UTF_8), null, "req-1"));
 
@@ -139,12 +140,12 @@ class AslExecutorRetryTest {
         assertEquals("FAILED", execution.getStatus());
         assertEquals("Boom", execution.getError());
         verify(lambdaExecutor, times(2))
-                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
     void lambdaServiceErrorRetrierDoesNotMatchFunctionError() {
-        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult(200, "Handled",
                         "{\"errorType\":\"Boom\"}".getBytes(StandardCharsets.UTF_8), null, "req-1"));
 
@@ -170,12 +171,12 @@ class AslExecutorRetryTest {
         assertEquals("FAILED", execution.getStatus());
         assertEquals("Boom", execution.getError());
         verify(lambdaExecutor, times(1))
-                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
     void exhaustedRetrierFallsThroughToCatch() throws Exception {
-        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult(200, "Handled",
                         "{\"errorType\":\"Boom\"}".getBytes(StandardCharsets.UTF_8), null, "req-1"));
 
@@ -210,7 +211,7 @@ class AslExecutorRetryTest {
         assertEquals("Boom",
                 objectMapper.readTree(execution.getOutput()).path("Error").asText());
         verify(lambdaExecutor, times(2))
-                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
@@ -242,12 +243,12 @@ class AslExecutorRetryTest {
         assertEquals("SUCCEEDED", execution.getStatus());
         assertTrue(objectMapper.readTree(execution.getOutput()).path(0).path("ok").asBoolean());
         verify(lambdaExecutor, times(2))
-                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
     void parallelBranchFailureReachesCatch() throws Exception {
-        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult(200, "Handled",
                         "{\"errorType\":\"Boom\"}".getBytes(StandardCharsets.UTF_8), null, "req-1"));
 
@@ -276,7 +277,7 @@ class AslExecutorRetryTest {
         assertEquals("Boom",
                 objectMapper.readTree(execution.getOutput()).path("Error").asText());
         verify(lambdaExecutor, times(1))
-                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
@@ -314,7 +315,7 @@ class AslExecutorRetryTest {
         assertEquals("SUCCEEDED", execution.getStatus());
         assertTrue(objectMapper.readTree(execution.getOutput()).path(0).path("ok").asBoolean());
         verify(lambdaExecutor, times(2))
-                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
@@ -348,12 +349,12 @@ class AslExecutorRetryTest {
         assertEquals("SUCCEEDED", execution.getStatus());
         assertTrue(objectMapper.readTree(execution.getOutput()).path(0).path("ok").asBoolean());
         verify(lambdaExecutor, times(2))
-                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
     void branchErrorStillFailsTheExecution() {
-        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenThrow(new AssertionError("boom"));
 
         Execution execution = run("""
@@ -408,7 +409,7 @@ class AslExecutorRetryTest {
     }
 
     private void failOnceThenSucceed() {
-        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(flakyFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult(200, "Handled",
                         "{\"errorType\":\"Boom\"}".getBytes(StandardCharsets.UTF_8), null, "req-1"))
                 .thenReturn(new InvokeResult(200, null,

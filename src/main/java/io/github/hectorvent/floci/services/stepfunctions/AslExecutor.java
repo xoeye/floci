@@ -1304,8 +1304,8 @@ public class AslExecutor {
                     throw new FailStateException("Lambda.AccessDeniedException", refusal.get());
                 }
             }
-            LambdaFunction fn = resolveLambdaFunction(accountId, region, functionName,
-                    extractLambdaQualifier(functionRef));
+            String qualifier = extractLambdaQualifier(functionRef);
+            LambdaFunction fn = resolveLambdaFunction(accountId, region, functionName, qualifier);
             if (fn == null) {
                 // A missing function is a task failure on AWS, so it must stay reachable for
                 // Retry and Catch instead of surfacing as States.Runtime.
@@ -1317,7 +1317,7 @@ public class AslExecutor {
             reportCustomResourceLiveness(payloadBytes);
             InvokeResult result;
             try {
-                result = lambdaExecutor.invoke(fn, payloadBytes, InvocationType.RequestResponse);
+                result = lambdaExecutor.invoke(fn, payloadBytes, InvocationType.RequestResponse, 0, qualifier);
             } catch (AwsException e) {
                 throw new FailStateException("Lambda." + e.getErrorCode(), e.getMessage());
             }

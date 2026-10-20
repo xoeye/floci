@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -67,7 +68,7 @@ class AslExecutorLambdaInvokeResultTest {
         function.setFunctionArn(FUNCTION_ARN);
 
         when(functionStore.get(REGION, FUNCTION_NAME)).thenReturn(Optional.of(function));
-        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenAnswer(invocation -> {
                     JsonNode event = objectMapper.readTree((byte[]) invocation.getArgument(1));
                     byte[] output = objectMapper.writeValueAsBytes(objectMapper.createObjectNode()
@@ -291,7 +292,7 @@ class AslExecutorLambdaInvokeResultTest {
         function.setFunctionArn(FUNCTION_ARN + ":" + version);
         function.setVersion(version);
         when(functionStore.get(REGION, FUNCTION_NAME, version)).thenReturn(Optional.of(function));
-        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult(200, null,
                         objectMapper.writeValueAsBytes(objectMapper.createObjectNode().put("marker", marker)),
                         null, "version-request"));
