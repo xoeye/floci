@@ -64,7 +64,8 @@ public class LambdaTargetResolver {
         }
     }
 
-    static String mappingQualifier(EventSourceMapping esm) {
+    /** The version or alias a mapping's {@code FunctionArn} names, or null when it is unqualified. */
+    public static String mappingQualifier(EventSourceMapping esm) {
         return esm.getFunctionArn() == null ? null : LambdaArnUtils.resolve(esm.getFunctionArn()).qualifier();
     }
 

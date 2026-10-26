@@ -25,6 +25,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -69,7 +70,7 @@ class AslExecutorLambdaThrottleTest {
         LambdaConcurrencyLimiter limiter = new LambdaConcurrencyLimiter(config);
         LambdaConcurrencyLimiter.Permit held = limiter.acquire(function);
         AslExecutor executor = executor(nanos -> held.close());
-        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenAnswer(ignored -> {
                     try (LambdaConcurrencyLimiter.Permit invocationPermit = limiter.acquire(function)) {
                         return new InvokeResult(200, null,
@@ -85,7 +86,7 @@ class AslExecutorLambdaThrottleTest {
                 ? output.path("Payload").path("ok").asBoolean()
                 : output.path("ok").asBoolean());
         verify(lambdaExecutor, times(2))
-                .invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @ParameterizedTest
@@ -95,7 +96,7 @@ class AslExecutorLambdaThrottleTest {
         try (LambdaConcurrencyLimiter.Permit held = limiter.acquire(function)) {
             AslExecutor executor = executor(nanos -> {
             });
-            when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+            when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                     .thenAnswer(ignored -> {
                         LambdaConcurrencyLimiter.Permit unexpectedPermit = limiter.acquire(function);
                         unexpectedPermit.close();
@@ -108,7 +109,7 @@ class AslExecutorLambdaThrottleTest {
             assertEquals("Lambda.TooManyRequestsException", execution.getError());
             assertTrue(execution.getCause().contains("Rate Exceeded."));
             verify(lambdaExecutor, times(3))
-                    .invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse));
+                    .invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
         }
     }
 
@@ -124,7 +125,7 @@ class AslExecutorLambdaThrottleTest {
     void lambdaServiceErrorsUseLambdaNamespace(boolean optimized, String errorCode) {
         AslExecutor executor = executor(nanos -> {
         });
-        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenThrow(new AwsException(errorCode, "synthetic Lambda service failure", 500));
 
         Execution execution = run(executor, definition(optimized, 2));
@@ -133,7 +134,7 @@ class AslExecutorLambdaThrottleTest {
         assertEquals("Lambda." + errorCode, execution.getError());
         assertTrue(execution.getCause().contains("synthetic Lambda service failure"));
         verify(lambdaExecutor, times(1))
-                .invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @ParameterizedTest
@@ -141,7 +142,7 @@ class AslExecutorLambdaThrottleTest {
     void nonAwsLambdaRuntimeFailureRemainsTerminal(boolean optimized) {
         AslExecutor executor = executor(nanos -> {
         });
-        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenThrow(new IllegalStateException("broken integration"));
 
         Execution execution = run(executor, definition(optimized, 2));
@@ -150,7 +151,7 @@ class AslExecutorLambdaThrottleTest {
         assertEquals("States.Runtime", execution.getError());
         assertTrue(execution.getCause().contains("broken integration"));
         verify(lambdaExecutor, times(1))
-                .invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse));
+                .invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     private String definition(boolean optimized, int maxAttempts) {

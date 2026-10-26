@@ -319,7 +319,7 @@ class SqsEventSourcePollerTest {
 
         InvokeResult failure = new InvokeResult();
         failure.setFunctionError("Handled");
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(failure);
 
         poller.pollAndInvoke(esm);
@@ -396,7 +396,7 @@ class SqsEventSourcePollerTest {
 
         InvokeResult failure = new InvokeResult();
         failure.setFunctionError("Handled");
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(failure);
 
         poller.pollAndInvoke(esm);
@@ -419,7 +419,7 @@ class SqsEventSourcePollerTest {
         when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
                 .thenReturn(List.of(msg));
 
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
 
         poller.pollAndInvoke(esm);
@@ -552,7 +552,7 @@ class SqsEventSourcePollerTest {
             poller.pollAndInvoke(esm);
             try {
                 verify(executorService, timeout(2000))
-                        .invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse));
+                        .invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
                 return;
             } catch (AssertionError retry) {
                 if (System.currentTimeMillis() > deadline) {
@@ -576,7 +576,7 @@ class SqsEventSourcePollerTest {
         when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
                 .thenReturn(List.of(message("m1")))
                 .thenReturn(List.of());
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
 
         // Polls inside the window buffer the record without invoking. Each poll finishes before
@@ -587,7 +587,7 @@ class SqsEventSourcePollerTest {
         }
         verify(sqsService, atLeast(1))
                 .receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1"));
-        verify(executorService, never()).invoke(any(), any(), any());
+        verify(executorService, never()).invoke(any(), any(), any(), anyInt(), any());
         verify(sqsService, never()).deleteMessage(any(), any(), any());
 
         // Once the window elapses the buffered record is delivered.
@@ -609,7 +609,7 @@ class SqsEventSourcePollerTest {
                 .thenReturn(List.of(message("m1")))
                 .thenReturn(List.of(message("m2")))
                 .thenReturn(List.of());
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
 
         pollUntilInvoked(esm, fn);
@@ -651,14 +651,14 @@ class SqsEventSourcePollerTest {
         when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
                 .thenReturn(List.of(message("m1")))
                 .thenReturn(List.of());
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
 
         // Poll once with the window open: the record is buffered, not delivered.
         poller.pollAndInvoke(esm);
         verify(sqsService, timeout(2000))
                 .receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1"));
-        verify(executorService, never()).invoke(any(), any(), any());
+        verify(executorService, never()).invoke(any(), any(), any(), anyInt(), any());
 
         // Window turned off: the next poll must flush the stranded batch instead of ignoring it.
         esm.setMaximumBatchingWindowInSeconds(0);
@@ -675,7 +675,7 @@ class SqsEventSourcePollerTest {
         Message m1 = msgBody("m1", "{\"type\":\"order\"}");
         Message m2 = msgBody("m2", "{\"type\":\"refund\"}");
         stubReceive(esm, List.of(m1, m2));
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
 
         poller.pollAndInvoke(esm);
@@ -684,7 +684,7 @@ class SqsEventSourcePollerTest {
         verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
         // Only m1 is delivered to the function.
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(eq(fn), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(eq(fn), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         try {
             JsonNode records = OBJECT_MAPPER.readTree(payload.getValue()).get("Records");
             assertEquals(1, records.size());
@@ -710,7 +710,7 @@ class SqsEventSourcePollerTest {
         verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
         verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m2", "us-east-1");
         awaitPollCompleted(esm);
-        verify(executorService, never()).invoke(any(), any(byte[].class), any());
+        verify(executorService, never()).invoke(any(), any(byte[].class), any(), anyInt(), any());
     }
 
     @Test
@@ -724,7 +724,7 @@ class SqsEventSourcePollerTest {
                 .thenReturn(Map.of("VisibilityTimeout", "5"));
         InvokeResult err = new InvokeResult();
         err.setFunctionError("Handled");
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(err);
 
         poller.pollAndInvoke(esm);
@@ -748,7 +748,7 @@ class SqsEventSourcePollerTest {
         // Function (defensively) reports the already-filtered id m2 as failed.
         InvokeResult result = new InvokeResult();
         result.setPayload("{\"batchItemFailures\":[{\"itemIdentifier\":\"m2\"}]}".getBytes());
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(result);
 
         poller.pollAndInvoke(esm);
@@ -768,14 +768,14 @@ class SqsEventSourcePollerTest {
         Message m1 = msgBody("m1", "not json");                 // dropped by object pattern
         Message m2 = msgBody("m2", "{\"type\":\"order\"}");      // matches
         stubReceive(esm, List.of(m1, m2));
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult());
 
         poller.pollAndInvoke(esm);
 
         verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(executorService, timeout(2000)).invoke(eq(fn), payload.capture(), eq(InvocationType.RequestResponse));
+        verify(executorService, timeout(2000)).invoke(eq(fn), payload.capture(), eq(InvocationType.RequestResponse), anyInt(), any());
         try {
             JsonNode records = OBJECT_MAPPER.readTree(payload.getValue()).get("Records");
             assertEquals(1, records.size());
@@ -798,7 +798,7 @@ class SqsEventSourcePollerTest {
                 .thenReturn(Map.of("VisibilityTimeout", "2"));
         InvokeResult result = new InvokeResult();
         result.setPayload(payload.getBytes());
-        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(result);
 
         poller.pollAndInvoke(esm);

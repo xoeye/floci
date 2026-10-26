@@ -25,6 +25,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -75,7 +76,7 @@ class AslExecutorLambdaArnTargetTest {
         for (LambdaFunction function : List.of(home, otherRegion, otherAccount)) {
             byte[] output = objectMapper.writeValueAsBytes(
                     objectMapper.createObjectNode().put("invoked", function.getFunctionArn()));
-            when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse)))
+            when(lambdaExecutor.invoke(eq(function), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                     .thenReturn(new InvokeResult(200, null, output, null, "request"));
         }
 
@@ -130,6 +131,26 @@ class AslExecutorLambdaArnTargetTest {
     }
 
     @Test
+    void aQualifiedFunctionArnInvokesThatVersionWithItsQualifier() {
+        LambdaFunction version = function(ACCOUNT, REGION);
+        version.setVersion("3");
+        version.setFunctionArn(functionArn(ACCOUNT, REGION) + ":3");
+        when(functionStore.get(REGION, FUNCTION_NAME, "3")).thenReturn(Optional.of(version));
+        when(lambdaExecutor.invoke(eq(version), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
+                .thenReturn(new InvokeResult(200, null, "{}".getBytes(), null, "request"));
+
+        Execution execution = run("""
+                {"StartAt": "Call", "States": {"Call": {"Type": "Task",
+                  "Resource": "arn:aws:states:::lambda:invoke",
+                  "Parameters": {"FunctionName": "%s:3"}, "End": true}}}
+                """.formatted(functionArn(ACCOUNT, REGION)));
+
+        assertEquals("SUCCEEDED", execution.getStatus());
+        verify(lambdaExecutor).invoke(eq(version), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(),
+                eq("3"));
+    }
+
+    @Test
     void optimizedInvokeRefusesAFunctionArnFromAnotherRegion() {
         Execution execution = run("""
                 {"StartAt": "Call", "States": {"Call": {"Type": "Task",
@@ -167,7 +188,7 @@ class AslExecutorLambdaArnTargetTest {
         assertEquals("FAILED", execution.getStatus());
         assertEquals("Lambda.AccessDeniedException", execution.getError());
         assertEquals("refused", execution.getCause());
-        verify(lambdaExecutor, never()).invoke(any(), any(byte[].class), any());
+        verify(lambdaExecutor, never()).invoke(any(), any(byte[].class), any(), anyInt(), any());
     }
 
     @Test
@@ -210,7 +231,7 @@ class AslExecutorLambdaArnTargetTest {
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("Lambda.AccessDeniedException", execution.getError());
-        verify(lambdaExecutor, never()).invoke(any(), any(byte[].class), any());
+        verify(lambdaExecutor, never()).invoke(any(), any(byte[].class), any(), anyInt(), any());
     }
 
     @Test
@@ -245,7 +266,7 @@ class AslExecutorLambdaArnTargetTest {
         assertEquals("States.Permissions", execution.getError());
         assertEquals("refused", execution.getCause());
         verify(authorizer, never()).refusal(anyString(), anyString());
-        verify(lambdaExecutor, never()).invoke(any(), any(byte[].class), any());
+        verify(lambdaExecutor, never()).invoke(any(), any(byte[].class), any(), anyInt(), any());
     }
 
     @Test

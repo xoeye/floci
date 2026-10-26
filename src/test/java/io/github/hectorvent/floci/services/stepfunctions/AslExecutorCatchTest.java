@@ -24,6 +24,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -61,9 +62,9 @@ class AslExecutorCatchTest {
 
         when(functionStore.get(REGION, FAILING_FUNCTION_NAME)).thenReturn(Optional.of(failingFunction));
         when(functionStore.get(REGION, CLEANUP_FUNCTION_NAME)).thenReturn(Optional.of(cleanupFunction));
-        when(lambdaExecutor.invoke(eq(failingFunction), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(failingFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenReturn(new InvokeResult(200, "Handled", errorPayload(), null, "fail-request"));
-        when(lambdaExecutor.invoke(eq(cleanupFunction), any(byte[].class), eq(InvocationType.RequestResponse)))
+        when(lambdaExecutor.invoke(eq(cleanupFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any()))
                 .thenAnswer(invocation -> {
                     byte[] payload = invocation.getArgument(1);
                     JsonNode input = objectMapper.readTree(payload);
@@ -117,8 +118,8 @@ class AslExecutorCatchTest {
         assertEquals("token-1", output.path("input").path("cleanupToken").asText());
         assertTrue(output.path("input").path("fail").asBoolean());
 
-        verify(lambdaExecutor).invoke(eq(failingFunction), any(byte[].class), eq(InvocationType.RequestResponse));
-        verify(lambdaExecutor).invoke(eq(cleanupFunction), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(lambdaExecutor).invoke(eq(failingFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
+        verify(lambdaExecutor).invoke(eq(cleanupFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     @Test
@@ -139,8 +140,8 @@ class AslExecutorCatchTest {
         assertEquals("FAILED", execution.getStatus());
         assertEquals("ContractFailure", execution.getError());
         assertEquals(ERROR_PAYLOAD, execution.getCause());
-        verify(lambdaExecutor).invoke(eq(failingFunction), any(byte[].class), eq(InvocationType.RequestResponse));
-        verify(lambdaExecutor, never()).invoke(eq(cleanupFunction), any(byte[].class), eq(InvocationType.RequestResponse));
+        verify(lambdaExecutor).invoke(eq(failingFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
+        verify(lambdaExecutor, never()).invoke(eq(cleanupFunction), any(byte[].class), eq(InvocationType.RequestResponse), anyInt(), any());
     }
 
     private Execution run(String definition) {
