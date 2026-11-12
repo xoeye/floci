@@ -89,7 +89,7 @@ class DynamoDbStreamServiceTest {
         service.captureEvent("INSERT", null, item, table, "us-east-1");
 
         String iterator = service.getShardIterator(
-                sd.getStreamArn(), "shardId-000000000000", "TRIM_HORIZON", null);
+                sd.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
         List<DynamoDbStreamRecord> records = service.getRecords(iterator, 10).records();
 
         assertEquals(1, records.size());
@@ -488,4 +488,89 @@ class DynamoDbStreamServiceTest {
         return records.get(0);
     }
 
+
+    // ── multi-shard tests ──────────────────────────────────────
+
+    @Test
+    void multiShardDistributesRecordsByPartitionKey() throws Exception {
+        int shards = 4;
+        DynamoDbStreamService multi = new DynamoDbStreamService(mapper, new InMemoryStorage<>(), shards);
+        TableDefinition table = new TableDefinition("Multi",
+                List.of(new KeySchemaElement("pk", "HASH")),
+                List.of(new AttributeDefinition("pk", "S")),
+                "us-east-1", "000000000000");
+        StreamDescription stream = multi.enableStream("Multi", table.getTableArn(),
+                "NEW_AND_OLD_IMAGES", "us-east-1");
+
+        // Insert items with different partition keys.
+        for (int i = 0; i < 20; i++) {
+            JsonNode item = mapper.readTree("{\"pk\":{\"S\":\"key-" + i + "\"}}");
+            multi.captureEvent("INSERT", null, item, table, "us-east-1");
+        }
+
+        // Collect records from each shard.
+        int total = 0;
+        int nonEmptyShards = 0;
+        for (int s = 0; s < shards; s++) {
+            String shardId = DynamoDbStreamService.shardIdOf(s);
+            String iterator = multi.getShardIterator(stream.getStreamArn(), shardId, "TRIM_HORIZON", null);
+            List<DynamoDbStreamRecord> page = multi.getRecords(iterator, 1000).records();
+            total += page.size();
+            if (!page.isEmpty()) {
+                nonEmptyShards++;
+            }
+        }
+
+        assertEquals(20, total, "all records accounted for across shards");
+        assertTrue(nonEmptyShards > 1, "records should land on more than one shard with 20 distinct keys");
+    }
+
+    @Test
+    void multiShardSameKeyAlwaysLandsOnSameShard() throws Exception {
+        int shards = 4;
+        DynamoDbStreamService multi = new DynamoDbStreamService(mapper, new InMemoryStorage<>(), shards);
+        TableDefinition table = new TableDefinition("Same",
+                List.of(new KeySchemaElement("pk", "HASH")),
+                List.of(new AttributeDefinition("pk", "S")),
+                "us-east-1", "000000000000");
+        StreamDescription stream = multi.enableStream("Same", table.getTableArn(),
+                "NEW_AND_OLD_IMAGES", "us-east-1");
+
+        // Insert 5 records with the same key.
+        for (int i = 0; i < 5; i++) {
+            JsonNode item = mapper.readTree("{\"pk\":{\"S\":\"same-key\"},\"v\":{\"N\":\"" + i + "\"}}");
+            multi.captureEvent("MODIFY", null, item, table, "us-east-1");
+        }
+
+        // Exactly one shard should have all 5.
+        int shardWithRecords = -1;
+        for (int s = 0; s < shards; s++) {
+            String shardId = DynamoDbStreamService.shardIdOf(s);
+            String iterator = multi.getShardIterator(stream.getStreamArn(), shardId, "TRIM_HORIZON", null);
+            List<DynamoDbStreamRecord> page = multi.getRecords(iterator, 1000).records();
+            if (!page.isEmpty()) {
+                assertEquals(-1, shardWithRecords, "only one shard should have records for the same key");
+                assertEquals(5, page.size());
+                shardWithRecords = s;
+            }
+        }
+        assertTrue(shardWithRecords >= 0, "some shard should have records");
+    }
+
+    @Test
+    void shardIdsReturnsCorrectCount() {
+        DynamoDbStreamService multi = new DynamoDbStreamService(mapper, new InMemoryStorage<>(), 4);
+        List<String> ids = multi.shardIds();
+        assertEquals(4, ids.size());
+        assertEquals("shardId-0000000001-00000000001", ids.get(0));
+        assertEquals("shardId-0000000001-00000000004", ids.get(3));
+    }
+
+    @Test
+    void invalidShardIdIsRejected() {
+        StreamDescription stream = service.enableStream("Rej", TABLE_ARN, "NEW_IMAGE", "us-east-1");
+        // shard index 2 doesn't exist on a 1-shard stream
+        assertThrows(AwsException.class, () ->
+                service.getShardIterator(stream.getStreamArn(), "shardId-0000000001-00000000002", "TRIM_HORIZON", null));
+    }
 }

@@ -116,12 +116,14 @@ public class NativeDynamoDbStreamsJsonHandler {
         node.set("KeySchema", keySchemaArray);
 
         ArrayNode shards = objectMapper.createArrayNode();
-        ObjectNode shard = objectMapper.createObjectNode();
-        shard.put("ShardId", DynamoDbStreamService.SHARD_ID);
-        ObjectNode seqRange = objectMapper.createObjectNode();
-        seqRange.put("StartingSequenceNumber", sd.getStartingSequenceNumber());
-        shard.set("SequenceNumberRange", seqRange);
-        shards.add(shard);
+        for (String shardId : streamService.shardIds()) {
+            ObjectNode shard = objectMapper.createObjectNode();
+            shard.put("ShardId", shardId);
+            ObjectNode seqRange = objectMapper.createObjectNode();
+            seqRange.put("StartingSequenceNumber", sd.getStartingSequenceNumber());
+            shard.set("SequenceNumberRange", seqRange);
+            shards.add(shard);
+        }
         node.set("Shards", shards);
 
         node.putNull("LastEvaluatedShardId");

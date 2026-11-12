@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -34,7 +35,8 @@ public class DynamoDbStreamService {
 
     private static final Logger LOG = Logger.getLogger(DynamoDbStreamService.class);
 
-    static final String SHARD_ID = "shardId-0000000001-00000000001";
+    /** The shard ID of the first (and, with the default shard count of 1, only) shard. */
+    static final String SHARD_ID = shardIdOf(0);
     static final int MAX_RECORDS = 1000;
     private static final String ZERO_SEQUENCE_NUMBER = "000000000000000000000";
 
@@ -43,6 +45,7 @@ public class DynamoDbStreamService {
 
     /** Keyed by table ARN, which is unique per partition, region, account and table. */
     private final ConcurrentHashMap<String, StreamDescription> streams = new ConcurrentHashMap<>();
+    /** Per-shard record deques, keyed by {@code streamArn + "|shard|" + shardIndex}. */
     private final ConcurrentHashMap<String, ConcurrentLinkedDeque<DynamoDbStreamRecord>> records =
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> streamRecordCounts = new ConcurrentHashMap<>();
@@ -50,16 +53,26 @@ public class DynamoDbStreamService {
     private final ConcurrentHashMap<String, AtomicLong> sequenceCounters = new ConcurrentHashMap<>();
 
     private final ObjectMapper objectMapper;
+    final int shardCount;
 
     @Inject
-    public DynamoDbStreamService(ObjectMapper objectMapper, StorageFactory storageFactory) {
+    public DynamoDbStreamService(ObjectMapper objectMapper, StorageFactory storageFactory,
+                                  EmulatorConfig config) {
         this(objectMapper, storageFactory.create("dynamodb", "dynamodb-tables.json",
-                new TypeReference<Map<String, TableDefinition>>() {}));
+                new TypeReference<Map<String, TableDefinition>>() {}),
+                config.services().dynamodb().streamShardCount());
     }
 
     /** Package-private constructor for testing. */
     DynamoDbStreamService(ObjectMapper objectMapper, StorageBackend<String, TableDefinition> tableStore) {
+        this(objectMapper, tableStore, 1);
+    }
+
+    /** Package-private constructor for testing with a configurable shard count. */
+    DynamoDbStreamService(ObjectMapper objectMapper, StorageBackend<String, TableDefinition> tableStore,
+                          int shardCount) {
         this.objectMapper = objectMapper;
+        this.shardCount = Math.max(1, shardCount);
         loadPersistedStreams(tableStore);
     }
 
@@ -124,9 +137,12 @@ public class DynamoDbStreamService {
         sd.setStartingSequenceNumber(String.format("%021d", 1));
 
         streams.put(tableArn, sd);
-        records.put(streamArn, new ConcurrentLinkedDeque<>());
-        streamRecordCounts.put(streamArn, new AtomicLong());
-        LOG.infov("Enabled stream for table {0} in region {1}: {2}", tableName, region, streamArn);
+        for (int i = 0; i < shardCount; i++) {
+            records.put(shardDequeKey(streamArn, i), new ConcurrentLinkedDeque<>());
+            streamRecordCounts.put(shardDequeKey(streamArn, i), new AtomicLong());
+        }
+        LOG.infov("Enabled stream for table {0} in region {1}: {2} ({3} shards)",
+                tableName, region, streamArn, shardCount);
         return sd;
     }
 
@@ -141,8 +157,10 @@ public class DynamoDbStreamService {
     public void deleteStream(String tableArn) {
         StreamDescription sd = streams.remove(tableArn);
         if (sd != null) {
-            records.remove(sd.getStreamArn());
-            streamRecordCounts.remove(sd.getStreamArn());
+            for (int i = 0; i < shardCount; i++) {
+                records.remove(shardDequeKey(sd.getStreamArn(), i));
+                streamRecordCounts.remove(shardDequeKey(sd.getStreamArn(), i));
+            }
             sequenceCounters.remove(sd.getStreamArn());
             LOG.infov("Deleted stream for table {0}", tableArn);
         }
@@ -171,6 +189,9 @@ public class DynamoDbStreamService {
         JsonNode sourceItem = newItem != null ? newItem : oldItem;
         ObjectNode keys = buildKeys(sourceItem, table);
 
+        // Assign to shard by hashing the partition key, matching real DynamoDB behavior.
+        int shardIndex = shardIndexForKeys(keys, table);
+
         String viewType = sd.getStreamViewType();
         JsonNode newImage = buildImage(newItem, viewType, true);
         JsonNode oldImage = buildImage(oldItem, viewType, false);
@@ -188,13 +209,14 @@ public class DynamoDbStreamService {
         record.setStreamViewType(viewType);
         record.setTtlDeletion(ttlDeletion);
 
-        ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(sd.getStreamArn());
+        String dequeKey = shardDequeKey(sd.getStreamArn(), shardIndex);
+        ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(dequeKey);
         if (deque != null) {
             synchronized (deque) {
                 long seq = sequenceCounters.computeIfAbsent(sd.getStreamArn(), k -> new AtomicLong())
                         .incrementAndGet();
                 record.setSequenceNumber(String.format("%021d", seq));
-                streamRecordCounts.computeIfAbsent(sd.getStreamArn(), ignored -> new AtomicLong())
+                streamRecordCounts.computeIfAbsent(dequeKey, ignored -> new AtomicLong())
                         .incrementAndGet();
                 deque.addLast(record);
                 while (deque.size() > MAX_RECORDS) {
@@ -202,6 +224,26 @@ public class DynamoDbStreamService {
                 }
             }
         }
+    }
+
+    /** Hash the partition key value to a shard index. Items with the same PK always land on the same shard. */
+    private int shardIndexForKeys(ObjectNode keys, TableDefinition table) {
+        if (shardCount <= 1) {
+            return 0;
+        }
+        String hashKeyName = null;
+        for (KeySchemaElement ks : table.getKeySchema()) {
+            if ("HASH".equals(ks.getKeyType())) {
+                hashKeyName = ks.getAttributeName();
+                break;
+            }
+        }
+        if (hashKeyName == null || !keys.has(hashKeyName)) {
+            return 0;
+        }
+        // Use the string representation of the key value for hashing.
+        int hash = keys.get(hashKeyName).toString().hashCode();
+        return Math.floorMod(hash, shardCount);
     }
 
     private ObjectNode buildKeys(JsonNode item, TableDefinition table) {
@@ -256,6 +298,15 @@ public class DynamoDbStreamService {
                 "Stream not found: " + streamArn, 400);
     }
 
+    /** The shard IDs this stream has. */
+    List<String> shardIds() {
+        List<String> ids = new ArrayList<>(shardCount);
+        for (int i = 0; i < shardCount; i++) {
+            ids.add(shardIdOf(i));
+        }
+        return ids;
+    }
+
     String getShardIterator(String streamArn, String shardId,
                             String iteratorType, String sequenceNumber) {
         StreamDescription sd = describeStream(streamArn);
@@ -264,7 +315,9 @@ public class DynamoDbStreamService {
                     "Stream not found: " + streamArn, 400);
         }
 
-        ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(streamArn);
+        int shardIndex = shardIndexOf(shardId);
+        String dequeKey = shardDequeKey(streamArn, shardIndex);
+        ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(dequeKey);
         List<DynamoDbStreamRecord> snapshot;
         long recordCount;
         if (deque == null) {
@@ -273,7 +326,7 @@ public class DynamoDbStreamService {
         } else {
             synchronized (deque) {
                 snapshot = new ArrayList<>(deque);
-                recordCount = streamRecordCounts.getOrDefault(streamArn, new AtomicLong()).get();
+                recordCount = streamRecordCounts.getOrDefault(dequeKey, new AtomicLong()).get();
             }
         }
 
@@ -293,7 +346,7 @@ public class DynamoDbStreamService {
 
         boolean inclusive = "TRIM_HORIZON".equals(iteratorType) || "AT_SEQUENCE_NUMBER".equals(iteratorType);
         long cursorRecordCount = zeroSequence().equals(cursorSequence) ? recordCount : -1;
-        return encodeIterator(streamArn, cursorSequence, inclusive, cursorRecordCount);
+        return encodeIterator(streamArn, shardIndex, cursorSequence, inclusive, cursorRecordCount);
     }
 
     private int findSequencePosition(List<DynamoDbStreamRecord> records, String targetSeq, boolean inclusive) {
@@ -312,11 +365,13 @@ public class DynamoDbStreamService {
     GetRecordsResult getRecords(String shardIterator, Integer limit) {
         String[] parts = decodeIterator(shardIterator);
         String streamArn = parts[0];
-        String cursorSequence = parts[1];
-        boolean inclusive = Boolean.parseBoolean(parts[2]);
-        long cursorRecordCount = parseRecordCount(parts[3]);
+        int shardIndex = Integer.parseInt(parts[1]);
+        String cursorSequence = parts[2];
+        boolean inclusive = Boolean.parseBoolean(parts[3]);
+        long cursorRecordCount = parseRecordCount(parts[4]);
 
-        ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(streamArn);
+        String dequeKey = shardDequeKey(streamArn, shardIndex);
+        ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(dequeKey);
         List<DynamoDbStreamRecord> snapshot;
         long currentRecordCount;
         if (deque == null) {
@@ -325,7 +380,7 @@ public class DynamoDbStreamService {
         } else {
             synchronized (deque) {
                 snapshot = new ArrayList<>(deque);
-                currentRecordCount = streamRecordCounts.getOrDefault(streamArn, new AtomicLong()).get();
+                currentRecordCount = streamRecordCounts.getOrDefault(dequeKey, new AtomicLong()).get();
             }
         }
         int position = findSequencePosition(snapshot, cursorSequence, inclusive);
@@ -348,12 +403,14 @@ public class DynamoDbStreamService {
                 ? cursorSequence
                 : page.get(page.size() - 1).getSequenceNumber();
         long nextRecordCount = zeroSequence().equals(nextSequence) ? cursorRecordCount : -1;
-        String nextIterator = encodeIterator(streamArn, nextSequence, page.isEmpty() && inclusive, nextRecordCount);
+        String nextIterator = encodeIterator(streamArn, shardIndex, nextSequence, page.isEmpty() && inclusive, nextRecordCount);
         return new GetRecordsResult(new ArrayList<>(page), nextIterator);
     }
 
-    private String encodeIterator(String streamArn, String sequenceNumber, boolean inclusive, long recordCount) {
-        String raw = streamArn + "|" + sequenceNumber + "|" + inclusive + "|" + recordCount;
+    /** Encode a shard iterator with the shard index embedded. */
+    private String encodeIterator(String streamArn, int shardIndex, String sequenceNumber,
+                                   boolean inclusive, long recordCount) {
+        String raw = streamArn + "|" + shardIndex + "|" + sequenceNumber + "|" + inclusive + "|" + recordCount;
         return Base64.getEncoder().encodeToString(raw.getBytes());
     }
 
@@ -365,24 +422,30 @@ public class DynamoDbStreamService {
     private String[] decodeIterator(String iterator) {
         try {
             String raw = new String(Base64.getDecoder().decode(iterator));
+            // Format: streamArn|shardIndex|sequenceNumber|inclusive|recordCount
+            // Parse from the right since streamArn can contain pipes in theory.
             int lastPipe = raw.lastIndexOf('|');
-            int sequencePipe = raw.lastIndexOf('|', lastPipe - 1);
-            int inclusivePipe = raw.lastIndexOf('|', sequencePipe - 1);
-            if (inclusivePipe < 0 || sequencePipe < 0 || lastPipe < 0 || lastPipe == raw.length() - 1) {
+            int inclusivePipe = raw.lastIndexOf('|', lastPipe - 1);
+            int sequencePipe = raw.lastIndexOf('|', inclusivePipe - 1);
+            int shardPipe = raw.lastIndexOf('|', sequencePipe - 1);
+            if (shardPipe < 0 || sequencePipe < 0 || inclusivePipe < 0 || lastPipe < 0
+                    || lastPipe == raw.length() - 1) {
                 throw new AwsException("ValidationException", "Invalid shard iterator", 400);
             }
-            String inclusive = raw.substring(sequencePipe + 1, lastPipe);
+            String shardIndex = raw.substring(shardPipe + 1, sequencePipe);
+            String inclusive = raw.substring(inclusivePipe + 1, lastPipe);
             String recordCount = raw.substring(lastPipe + 1);
             if (!"true".equals(inclusive) && !"false".equals(inclusive)) {
                 throw new AwsException("ValidationException", "Invalid shard iterator", 400);
             }
             try {
+                Integer.parseInt(shardIndex);
                 Long.parseLong(recordCount);
             } catch (NumberFormatException e) {
                 throw new AwsException("ValidationException", "Invalid shard iterator", 400);
             }
-            return new String[]{raw.substring(0, inclusivePipe), raw.substring(inclusivePipe + 1, sequencePipe),
-                    inclusive, recordCount};
+            return new String[]{raw.substring(0, shardPipe), shardIndex,
+                    raw.substring(sequencePipe + 1, inclusivePipe), inclusive, recordCount};
         } catch (IllegalArgumentException e) {
             throw new AwsException("ValidationException", "Invalid shard iterator", 400);
         }
@@ -398,5 +461,36 @@ public class DynamoDbStreamService {
 
     private String zeroSequence() {
         return ZERO_SEQUENCE_NUMBER;
+    }
+
+    // ── shard helpers ──────────────────────────────────────────
+
+    /** Build a shard ID from a zero-based index: {@code shardId-0000000001-00000000NNN}. */
+    static String shardIdOf(int index) {
+        return String.format("shardId-0000000001-%011d", index + 1);
+    }
+
+    /** Parse the zero-based shard index from a shard ID. */
+    private int shardIndexOf(String shardId) {
+        if (shardId == null || !shardId.startsWith("shardId-")) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Shard " + shardId + " does not exist", 400);
+        }
+        try {
+            int idx = Integer.parseInt(shardId.substring(shardId.lastIndexOf('-') + 1)) - 1;
+            if (idx < 0 || idx >= shardCount) {
+                throw new AwsException("ResourceNotFoundException",
+                        "Shard " + shardId + " does not exist", 400);
+            }
+            return idx;
+        } catch (NumberFormatException e) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Shard " + shardId + " does not exist", 400);
+        }
+    }
+
+    /** Key for the per-shard record deque map. */
+    private static String shardDequeKey(String streamArn, int shardIndex) {
+        return streamArn + "|shard|" + shardIndex;
     }
 }
