@@ -3190,7 +3190,7 @@ public class CognitoService implements ResourceProvider {
         if (attrValue != null) {
             matches = startsWithOp ? attrValue.startsWith(rawValue) : attrValue.equals(rawValue);
         }
-        LOG.infov("Matching user {0} against filter [{1}]: attrName=[{2}], rawValue=[{3}], attrValue=[{4}], matches={5}",
+        LOG.debugv("Matching user {0} against filter [{1}]: attrName=[{2}], rawValue=[{3}], attrValue=[{4}], matches={5}",
                 user.getUsername(), originalFilter, attrName, rawValue, attrValue, matches);
         return matches;
     }
