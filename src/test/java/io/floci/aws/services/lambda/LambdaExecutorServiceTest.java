@@ -1,8 +1,10 @@
 package io.floci.aws.services.lambda;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.lambda.launcher.ContainerHandle;
+import io.floci.aws.services.lambda.launcher.LambdaRuntimeLauncher;
 import io.floci.aws.services.lambda.model.ContainerState;
 import io.floci.aws.services.lambda.model.FunctionEventInvokeConfig;
 import io.floci.aws.services.lambda.model.InvocationType;
@@ -740,5 +742,110 @@ class LambdaExecutorServiceTest {
             return null;
         }).when(router).route(any(), any(), any(), anyInt(), anyInt(), any());
         return routed;
+    }
+
+    @Test
+    void theRuntimeIsToldTheArnTheFunctionWasInvokedBy() {
+        LambdaFunction version = version("1");
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        when(warmPool.acquire(any())).thenReturn(new ContainerHandle("cid-arn", "test-fn", rtas, ContainerState.WARM));
+        List<String> invokedArns = recordInvokedArns(rtas);
+
+        executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, 0, null);
+        executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, 0, "$LATEST");
+        executor.invoke(version, "{}".getBytes(), InvocationType.RequestResponse, 0, "1");
+        executor.invoke(version, "{}".getBytes(), InvocationType.RequestResponse, 0, "live");
+
+        String unqualified = fn.getFunctionArn();
+        assertEquals(List.of(unqualified, unqualified + ":$LATEST", unqualified + ":1", unqualified + ":live"),
+                invokedArns);
+    }
+
+    @Test
+    void eventInvocation_everyRetryIsToldTheInvokedAliasArn() throws Exception {
+        LambdaFunction version = version("1");
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaService lambdaService = mock(LambdaService.class);
+        FunctionEventInvokeConfig config = new FunctionEventInvokeConfig();
+        config.setMaximumRetryAttempts(1);
+        when(lambdaService.findEventInvokeConfig(version, "live")).thenReturn(Optional.of(config));
+        when(lambdaService.isLive(version)).thenReturn(true);
+        LambdaExecutorService retryExecutor = registerExecutor(
+                new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, router, lambdaService));
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        when(warmPool.acquire(any())).thenReturn(new ContainerHandle("cid-alias-retry", "test-fn", rtas,
+                ContainerState.WARM));
+        List<String> invokedArns = new CopyOnWriteArrayList<>();
+        doAnswer(invocation -> {
+            PendingInvocation pending = invocation.getArgument(0);
+            invokedArns.add(pending.getInvokedFunctionArn());
+            pending.getResultFuture().complete(new InvokeResult(200, "Unhandled",
+                    "{\"errorMessage\":\"fails\"}".getBytes(), null, pending.getRequestId()));
+            return pending.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+        CountDownLatch routed = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            routed.countDown();
+            return null;
+        }).when(router).route(any(), any(), any(), anyInt(), anyInt(), any());
+
+        retryExecutor.invoke(version, "{}".getBytes(), InvocationType.Event, 0, "live");
+
+        assertTrue(routed.await(5, TimeUnit.SECONDS), "destination routing never ran");
+        String aliasArn = fn.getFunctionArn() + ":live";
+        assertEquals(List.of(aliasArn, aliasArn), invokedArns);
+    }
+
+    @Test
+    void twoAliasesOfOneVersionShareItsWarmContainer() {
+        LambdaRuntimeLauncher launcher = mock(LambdaRuntimeLauncher.class);
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        when(launcher.launch(any())).thenAnswer(invocation -> new ContainerHandle("cid-shared", "test-fn", rtas,
+                ContainerState.WARM));
+        when(launcher.isAlive(any())).thenReturn(true);
+        WarmPool pool = new WarmPool(launcher, warmPoolConfig(), Clock.systemUTC());
+        LambdaExecutorService pooledExecutor =
+                registerExecutor(new LambdaExecutorService(pool, new ObjectMapper(), concurrencyLimiter));
+        List<String> invokedArns = recordInvokedArns(rtas);
+        LambdaFunction version = version("1");
+
+        pooledExecutor.invoke(version, "{}".getBytes(), InvocationType.RequestResponse, 0, "live");
+        pooledExecutor.invoke(version, "{}".getBytes(), InvocationType.RequestResponse, 0, "beta");
+
+        verify(launcher, times(1)).launch(any());
+        assertEquals(List.of(fn.getFunctionArn() + ":live", fn.getFunctionArn() + ":beta"), invokedArns);
+        pool.shutdown();
+    }
+
+    private LambdaFunction version(String number) {
+        LambdaFunction version = new LambdaFunction();
+        version.setFunctionName("test-fn");
+        version.setVersion(number);
+        version.setFunctionArn(fn.getFunctionArn() + ":" + number);
+        version.setTimeout(1);
+        return version;
+    }
+
+    private static List<String> recordInvokedArns(RuntimeApiServer rtas) {
+        List<String> invokedArns = new CopyOnWriteArrayList<>();
+        doAnswer(invocation -> {
+            PendingInvocation pending = invocation.getArgument(0);
+            invokedArns.add(pending.getInvokedFunctionArn());
+            pending.getResultFuture().complete(new InvokeResult(200, null, "{}".getBytes(), null,
+                    pending.getRequestId()));
+            return pending.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+        return invokedArns;
+    }
+
+    private static EmulatorConfig warmPoolConfig() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.lambda()).thenReturn(lambda);
+        when(lambda.warmPoolMaxPerFunction()).thenReturn(Optional.empty());
+        when(lambda.containerDrainTimeoutSeconds()).thenReturn(1);
+        return config;
     }
 }

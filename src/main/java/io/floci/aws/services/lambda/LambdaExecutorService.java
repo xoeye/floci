@@ -167,8 +167,9 @@ public class LambdaExecutorService implements Resettable {
         return invoke(fn, payload, type, 0);
     }
 
-    public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, String requestId) {
-        return invoke(fn, payload, type, 0, null, null, requestId, null);
+    public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, String invokedQualifier,
+                               String requestId) {
+        return invoke(fn, payload, type, 0, invokedQualifier, null, requestId, null);
     }
 
     /**
@@ -185,6 +186,10 @@ public class LambdaExecutorService implements Resettable {
         return invoke(fn, payload, type, chainDepth, null);
     }
 
+    /**
+     * Invokes {@code fn}, the version an alias or qualifier resolved to, telling the runtime the ARN it was
+     * invoked by: unqualified when {@code invokedQualifier} is null, else qualified with that version or alias.
+     */
     public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, int chainDepth,
                                String invokedQualifier) {
         return invoke(fn, payload, type, chainDepth, invokedQualifier, null);
@@ -358,10 +363,21 @@ public class LambdaExecutorService implements Resettable {
     }
 
     /**
+     * The ARN the runtime reports as invoked, which AWS takes from the request rather than from the version
+     * that ran: {@code fn:live} for an alias, {@code fn:1} for a version, the bare ARN when unqualified.
+     */
+    static String invokedFunctionArn(LambdaFunction fn, String invokedQualifier) {
+        String arn = fn.getFunctionArn();
+        String version = fn.getVersion();
+        if (version != null && !"$LATEST".equals(version) && arn.endsWith(":" + version)) {
+            arn = arn.substring(0, arn.length() - version.length() - 1);
+        }
+        return invokedQualifier == null ? arn : arn + ":" + invokedQualifier;
+    }
+
+    /**
      * A container that could not start because Docker is unreachable says so, rather than surfacing
      * the raw socket error ("No such file or directory") a native binary without Docker would get.
-     * With the Kubernetes executor a socket error comes from the cluster API, so it keeps its own
-     * message.
      */
     static String initFailureMessage(Exception e, boolean dockerExecutor) {
         LambdaInitException initFailure = initException(e);
@@ -409,7 +425,7 @@ public class LambdaExecutorService implements Resettable {
         }
         long deadlineMs = System.currentTimeMillis() + (long) fn.getTimeout() * 1000;
         PendingInvocation invocation = new PendingInvocation(
-                requestId, payload, deadlineMs, fn.getFunctionArn(),
+                requestId, payload, deadlineMs, invokedFunctionArn(fn, invokedQualifier),
                 new CompletableFuture<>());
         invocation.setClientContext(clientContext);
         invocation.setResponseStreamListener(listener);

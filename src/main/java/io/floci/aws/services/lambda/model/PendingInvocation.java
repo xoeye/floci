@@ -9,19 +9,19 @@ public class PendingInvocation {
     private final byte[] payload;
     private final long timeoutMs;
     private volatile long deadlineMs;
-    private final String functionArn;
+    private final String invokedFunctionArn;
     private final CompletableFuture<InvokeResult> resultFuture;
     private final CompletableFuture<Void> dispatchedFuture = new CompletableFuture<>();
     private volatile String clientContext;
     private volatile ResponseStreamListener responseStreamListener;
 
     public PendingInvocation(String requestId, byte[] payload, long deadlineMs,
-                              String functionArn, CompletableFuture<InvokeResult> resultFuture) {
+                              String invokedFunctionArn, CompletableFuture<InvokeResult> resultFuture) {
         this.requestId = requestId;
         this.payload = payload;
         this.deadlineMs = deadlineMs;
         this.timeoutMs = Math.max(0, deadlineMs - System.currentTimeMillis());
-        this.functionArn = functionArn;
+        this.invokedFunctionArn = invokedFunctionArn;
         this.resultFuture = resultFuture;
     }
 
@@ -37,7 +37,7 @@ public class PendingInvocation {
     public String getRequestId() { return requestId; }
     public byte[] getPayload() { return payload; }
     public long getDeadlineMs() { return deadlineMs; }
-    public String getFunctionArn() { return functionArn; }
+    public String getInvokedFunctionArn() { return invokedFunctionArn; }
     public String getClientContext() { return clientContext; }
     public void setClientContext(String clientContext) { this.clientContext = clientContext; }
     public ResponseStreamListener getResponseStreamListener() { return responseStreamListener; }
