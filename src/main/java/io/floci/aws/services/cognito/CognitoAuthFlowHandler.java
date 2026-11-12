@@ -546,9 +546,20 @@ final class CognitoAuthFlowHandler {
             }
             String username = responses.get("USERNAME");
             PasswordChangeSession pending = session == null ? null : passwordChangeSessions.get(session);
+            // The client may send the email alias as USERNAME; resolve it to the canonical username
+            // (the sub UUID) so the comparison against the session's stored username succeeds.
+            String responseUsername = username;
+            if (pending != null && responseUsername != null && !pending.username().equals(responseUsername)) {
+                try {
+                    CognitoUser resolved = service.adminGetUser(pool.getId(), responseUsername);
+                    responseUsername = resolved.getUsername();
+                } catch (AwsException ignored) {
+                    // User not found — fall through to the validation below which will reject it.
+                }
+            }
             if (pending == null || sessionExpired(pending.expiresAt())
                     || !pool.getId().equals(pending.userPoolId()) || !client.getClientId().equals(pending.clientId())
-                    || !service.signInKey(pool, pending.username()).equals(service.signInKey(pool, username))) {
+                    || !service.signInKey(pool, pending.username()).equals(service.signInKey(pool, responseUsername))) {
                 throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
             }
             validateSecretHash(client, responses, username);
