@@ -148,9 +148,10 @@ the reset.
 
 By default each stream has one shard. Set `FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_COUNT` to create
 multiple shards per stream. Records are assigned to shards by hashing the partition key, so items
-with the same key always land on the same shard, preserving per-item ordering. With multiple shards,
-Lambda event source mappings process shards in parallel, matching how real AWS tables behave under
-load.
+with the same key always land on the same shard, preserving per-item ordering. A Lambda event source
+mapping invokes its function for each shard concurrently, with at most one batch in flight per shard,
+as Lambda does with a `ParallelizationFactor` of 1. A shard's next batch starts only after its current
+batch returns, so records of one shard are delivered in order.
 
 ## Time to Live
 
