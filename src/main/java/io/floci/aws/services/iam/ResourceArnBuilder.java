@@ -89,10 +89,6 @@ public class ResourceArnBuilder {
     /** The route of Bedrock's resource-policy actions, which the ARN of the resource they act on may follow. */
     private static final String BEDROCK_RESOURCE_POLICY_ROUTE = "/resource-policy";
 
-    /** The SSM actions whose {@code ResourceArn} names the parameter they act on, in place of {@code Name}. */
-    private static final Set<String> SSM_RESOURCE_POLICY_ACTIONS =
-            Set.of("PutResourcePolicy", "GetResourcePolicies", "DeleteResourcePolicy");
-
     private final ObjectMapper objectMapper;
     /**
      * Looked up lazily through a provider: this builder is constructed by the enforcement filter,
@@ -232,7 +228,6 @@ public class ResourceArnBuilder {
             case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
-            case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
             case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
@@ -240,10 +235,6 @@ public class ResourceArnBuilder {
             case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
-            case "route53"        -> "route53:GetReusableDelegationSet".equals(operation)
-                    || "route53:DeleteReusableDelegationSet".equals(operation)
-                    ? List.of(buildRoute53DelegationSetArn(ctx, partition))
-                    : namedResources(credentialScope, operation, ctx, region, accountId, partition);
             case "bedrock"        -> List.of(buildBedrockArn(path, ctx));
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
@@ -274,17 +265,6 @@ public class ResourceArnBuilder {
             }
         }
         return null;
-    }
-
-    private String buildRoute53DelegationSetArn(ContainerRequestContext ctx, String partition) {
-        String id = ctx.getUriInfo().getPathParameters().getFirst("Id");
-        if (id == null) {
-            return "*";
-        }
-        if (id.startsWith("/delegationset/")) {
-            id = id.substring(15);
-        }
-        return AwsArnUtils.Arn.global(partition, "route53", "", "delegationset/" + id).toString();
     }
 
     private String buildResourceGroupArn(ContainerRequestContext ctx, String region, String accountId) {
@@ -1905,32 +1885,6 @@ public class ResourceArnBuilder {
         return new AwsArnUtils.Arn(partition, "secretsmanager", region, accountId, "secret:" + name).toString();
     }
 
-    // ── SSM ──────────────────────────────────────────────────────────────────────
-    private String buildSsmArn(ContainerRequestContext ctx, String region, String accountId) {
-        JsonNode json = readJsonBody(ctx);
-        if (json != null && json.isObject()) {
-            String operation = IamActionRegistry.targetOperation(ctx);
-            if (operation != null && SSM_RESOURCE_POLICY_ACTIONS.contains(operation)
-                    && json.hasNonNull("ResourceArn")) {
-                String resourceArn = json.get("ResourceArn").asText().trim();
-                if (AwsArnUtils.isArnFor(resourceArn, "ssm")) {
-                    return resourceArn;
-                }
-            }
-            if (json.hasNonNull("Name")) {
-                String name = json.get("Name").asText().trim();
-                if (!name.isEmpty()) {
-                    if (AwsArnUtils.isArnFor(name, "ssm")) {
-                        return name;
-                    }
-                    String paramResource = name.startsWith("/") ? "parameter" + name : "parameter/" + name;
-                    return AwsArnUtils.Arn.of("ssm", region, accountId, paramResource).toString();
-                }
-            }
-        }
-        return AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString();
-    }
-
     // ── KMS ──────────────────────────────────────────────────────────────────────
 
     /**
@@ -2268,16 +2222,11 @@ public class ResourceArnBuilder {
      * A Query-protocol parameter, read from the same place the handler reads it. For a form POST
      * that is the body alone: {@code AwsQueryController} dispatches on the form parameters and never
      * sees the URL query, so authorizing a URL value would check one resource and act on another.
-     * A value with an invalid percent escape is read as absent, so the resource stays the default
-     * and the request goes on to be answered as it is without enforcement.
+     * An invalid percent escape is rejected by the shared form decoder before authorization.
      */
     private String firstFormParam(ContainerRequestContext ctx, String name) {
         if (RequestBodyReader.isForm(ctx)) {
-            try {
-                return RequestBodyReader.formField(ctx, name);
-            } catch (IllegalArgumentException malformed) {
-                return null;
-            }
+            return RequestBodyReader.formField(ctx, name);
         }
         return ctx.getUriInfo().getQueryParameters().getFirst(name);
     }

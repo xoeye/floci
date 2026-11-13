@@ -16,6 +16,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.core.storage.StorageOperations;
 import io.floci.aws.services.glue.model.Classifier;
 import io.floci.aws.services.glue.model.Column;
 import io.floci.aws.services.glue.model.Connection;
@@ -84,6 +85,7 @@ public class GlueService {
     private static final Logger LOG = Logger.getLogger(GlueService.class);
     private static final int MAX_FUNCTION_PATTERN_LENGTH = 255;
     private static final int MAX_FUNCTION_RESULTS = 100;
+    private static final int MAX_BATCH_DELETE_TABLES = 100;
     private static final int MAX_SECURITY_CONFIGURATION_NAME_LENGTH = 255;
     private static final int MAX_DATA_QUALITY_NAME_LENGTH = 255;
     private static final int MAX_DATA_QUALITY_DESCRIPTION_LENGTH = 2048;
@@ -365,7 +367,7 @@ public class GlueService {
         createDatabase(database, null, regionResolver.getDefaultRegion());
     }
 
-    public void createDatabase(Database database, Map<String, String> tags, String region) {
+    public synchronized void createDatabase(Database database, Map<String, String> tags, String region) {
         String databaseName = normalizeName(database.getName());
         if (databaseStore.get(databaseName).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Database already exists: " + database.getName(), 400);
@@ -409,7 +411,7 @@ public class GlueService {
         }
     }
 
-    public void updateDatabase(String name, Database database) {
+    public synchronized void updateDatabase(String name, Database database) {
         Database existing = getDatabase(name);
         String databaseName = normalizeName(database.getName());
         if (!existing.getName().equals(databaseName)) {
@@ -430,19 +432,21 @@ public class GlueService {
         deleteDatabase(name, regionResolver.getDefaultRegion());
     }
 
-    public void deleteDatabase(String name, String region) {
+    public synchronized void deleteDatabase(String name, String region) {
         String databaseName = getDatabase(name).getName();
         List<String> tableNames = tableStore.scan(k -> true).stream()
                 .filter(table -> databaseName.equals(table.getDatabaseName()))
                 .map(Table::getName)
                 .toList();
         tableNames.forEach(tableName -> deleteTable(name, tableName));
+        StorageOperations.deleteMatchingAtomically(functionStore,
+                function -> databaseName.equals(function.getDatabaseName()));
         databaseStore.delete(databaseName);
         resourceGroupsTaggingService.deleteResources(List.of(databaseArn(region, databaseName)), region);
         LOG.infov("Deleted Glue Database: {0}", name);
     }
 
-    public void createTable(String databaseName, Table table) {
+    public synchronized void createTable(String databaseName, Table table) {
         requireValidSortColumns(sortColumnViolations("tableInput", table.getStorageDescriptor()));
         Database database = getDatabase(databaseName);
         String key = tableKey(databaseName, table.getName());
@@ -787,7 +791,7 @@ public class GlueService {
         }
     }
 
-    public void deleteTable(String databaseName, String tableName) {
+    public synchronized void deleteTable(String databaseName, String tableName) {
         getTable(databaseName, tableName);
         String key = tableKey(databaseName, tableName);
         tableStore.delete(key);
@@ -810,20 +814,27 @@ public class GlueService {
     }
 
     public List<BatchDeleteTableError> batchDeleteTables(String databaseName, List<String> tableNames) {
-        getDatabase(databaseName);
-        List<BatchDeleteTableError> errors = new ArrayList<>();
-        for (String tableName : tableNames) {
-            String key = tableKey(databaseName, tableName);
-            Optional<Table> table = tableStore.get(key);
-            if (table.isEmpty()) {
-                errors.add(new BatchDeleteTableError(
-                        tableName,
-                        new ErrorDetail("EntityNotFoundException", "Table " + tableName + " not found")));
-                continue;
-            }
-            deleteTable(databaseName, tableName);
+        validateRequired(tableNames, "TablesToDelete");
+        if (tableNames.size() > MAX_BATCH_DELETE_TABLES) {
+            throw new AwsException("InvalidInputException",
+                    "TablesToDelete must have at most " + MAX_BATCH_DELETE_TABLES + " items.", 400);
         }
-        return errors;
+        synchronized (this) {
+            getDatabase(databaseName);
+            List<BatchDeleteTableError> errors = new ArrayList<>();
+            for (String tableName : tableNames) {
+                String key = tableKey(databaseName, tableName);
+                Optional<Table> table = tableStore.get(key);
+                if (table.isEmpty()) {
+                    errors.add(new BatchDeleteTableError(
+                            tableName,
+                            new ErrorDetail("EntityNotFoundException", "Table " + tableName + " not found")));
+                    continue;
+                }
+                deleteTable(databaseName, tableName);
+            }
+            return errors;
+        }
     }
 
     public void updateColumnStatisticsForTable(
@@ -1280,7 +1291,7 @@ public class GlueService {
         partitionColumnStatisticsStore.delete(partitionColumnStatisticsKey(databaseName, tableName, partitionValues, columnName));
     }
 
-    public void createUserDefinedFunction(String databaseName, UserDefinedFunction function) {
+    public synchronized void createUserDefinedFunction(String databaseName, UserDefinedFunction function) {
         Database database = getDatabase(databaseName);
         String key = functionKey(databaseName, function.getFunctionName());
         if (functionStore.get(key).isPresent()) {
@@ -1293,7 +1304,7 @@ public class GlueService {
         functionStore.put(key, function);
     }
 
-    public UserDefinedFunction getUserDefinedFunction(String databaseName, String functionName) {
+    public synchronized UserDefinedFunction getUserDefinedFunction(String databaseName, String functionName) {
         getDatabase(databaseName);
         return functionStore.get(functionKey(databaseName, functionName))
                 .orElseThrow(() -> new AwsException("EntityNotFoundException",
@@ -1335,7 +1346,8 @@ public class GlueService {
         return new UserDefinedFunctionPage(functions.subList(offset, end), newNextToken);
     }
 
-    public void updateUserDefinedFunction(String databaseName, String functionName, UserDefinedFunction function) {
+    public synchronized void updateUserDefinedFunction(
+            String databaseName, String functionName, UserDefinedFunction function) {
         UserDefinedFunction existing = getUserDefinedFunction(databaseName, functionName);
         function.setDatabaseName(existing.getDatabaseName());
         function.setFunctionName(existing.getFunctionName());
@@ -1343,7 +1355,7 @@ public class GlueService {
         functionStore.put(functionKey(databaseName, functionName), function);
     }
 
-    public void deleteUserDefinedFunction(String databaseName, String functionName) {
+    public synchronized void deleteUserDefinedFunction(String databaseName, String functionName) {
         getUserDefinedFunction(databaseName, functionName);
         functionStore.delete(functionKey(databaseName, functionName));
     }

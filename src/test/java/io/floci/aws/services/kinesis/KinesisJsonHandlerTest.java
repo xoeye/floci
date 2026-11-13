@@ -15,9 +15,12 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.time.Clock;
 import java.time.Instant;
@@ -26,6 +29,8 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
@@ -132,13 +137,278 @@ class KinesisJsonHandlerTest {
         assertThat(handler.handle("CreateStream", req, REGION).getStatus(), is(200));
     }
 
+    @Test
+    void registerStreamConsumerPreservesTagsForResourceOperations() {
+        createStream("test-stream");
+        ObjectNode registration = MAPPER.createObjectNode()
+                .put("StreamARN", STREAM_ARN)
+                .put("ConsumerName", "tagged-consumer");
+        registration.putObject("Tags").put("team", "red");
+        String consumerArn = responseEntity(handler.handle("RegisterStreamConsumer", registration, REGION))
+                .path("Consumer").path("ConsumerARN").asText();
+        ObjectNode resource = MAPPER.createObjectNode().put("ResourceARN", consumerArn);
+
+        Response listed = handler.handle("ListTagsForResource", resource, REGION);
+        assertEquals(200, listed.getStatus());
+        assertEquals("team", responseEntity(listed).path("Tags").get(0).path("Key").asText());
+        assertEquals("red", responseEntity(listed).path("Tags").get(0).path("Value").asText());
+
+        ObjectNode tagRequest = resource.deepCopy();
+        tagRequest.putObject("Tags").put("env", "dev");
+        assertEquals(200, handler.handle("TagResource", tagRequest, REGION).getStatus());
+        JsonNode tags = responseEntity(handler.handle("ListTagsForResource", resource, REGION)).path("Tags");
+        assertEquals(2, tags.size());
+        assertEquals("red", tagValue(tags, "team"));
+        assertEquals("dev", tagValue(tags, "env"));
+    }
+
+    @Test
+    void resourceTagOperationsKeepStreamAndConsumerTagsSeparate() {
+        createStream("test-stream");
+        String consumerArn = service.registerStreamConsumer(STREAM_ARN, "tagged-consumer", REGION)
+                .getConsumerArn();
+        ObjectNode streamRequest = MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN);
+        streamRequest.putObject("Tags").put("owner", "stream");
+        assertEquals(200, handler.handle("TagResource", streamRequest, REGION).getStatus());
+        ObjectNode consumerRequest = MAPPER.createObjectNode().put("ResourceARN", consumerArn);
+        consumerRequest.putObject("Tags").put("owner", "consumer");
+        assertEquals(200, handler.handle("TagResource", consumerRequest, REGION).getStatus());
+
+        ObjectNode streamArnOnly = MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN);
+        ObjectNode consumerArnOnly = MAPPER.createObjectNode().put("ResourceARN", consumerArn);
+        assertEquals("stream", tagValue(responseEntity(handler.handle("ListTagsForResource", streamArnOnly, REGION))
+                .path("Tags"), "owner"));
+        assertEquals("consumer", tagValue(responseEntity(handler.handle("ListTagsForResource", consumerArnOnly, REGION))
+                .path("Tags"), "owner"));
+
+        consumerArnOnly.putArray("TagKeys").add("owner");
+        assertEquals(200, handler.handle("UntagResource", consumerArnOnly, REGION).getStatus());
+        consumerArnOnly.remove("TagKeys");
+        assertEquals(0, responseEntity(handler.handle("ListTagsForResource", consumerArnOnly, REGION))
+                .path("Tags").size());
+        assertEquals("stream", tagValue(responseEntity(handler.handle("ListTagsForResource", streamArnOnly, REGION))
+                .path("Tags"), "owner"));
+        ObjectNode legacyList = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        assertEquals("stream", tagValue(responseEntity(handler.handle("ListTagsForStream", legacyList, REGION))
+                .path("Tags"), "owner"));
+
+        streamArnOnly.putArray("TagKeys").add("owner");
+        assertEquals(200, handler.handle("UntagResource", streamArnOnly, REGION).getStatus());
+        streamArnOnly.remove("TagKeys");
+        assertEquals(0, responseEntity(handler.handle("ListTagsForResource", streamArnOnly, REGION))
+                .path("Tags").size());
+        assertEquals(0, responseEntity(handler.handle("ListTagsForResource", consumerArnOnly, REGION))
+                .path("Tags").size());
+    }
+
+    @Test
+    void resourceTagsRejectForeignAndMissingResources() {
+        createStream("test-stream");
+        String consumerArn = service.registerStreamConsumer(STREAM_ARN, "tagged-consumer", REGION)
+                .getConsumerArn();
+        ObjectNode request = MAPPER.createObjectNode();
+
+        request.put("ResourceARN", consumerArn.replace(ACCOUNT, "999999999999"));
+        AwsException foreign = assertThrows(AwsException.class,
+                () -> handler.handle("ListTagsForResource", request, REGION));
+        assertEquals("ResourceNotFoundException", foreign.getErrorCode());
+
+        request.put("ResourceARN", consumerArn.replace(REGION, "us-west-2"));
+        AwsException otherRegion = assertThrows(AwsException.class,
+                () -> handler.handle("ListTagsForResource", request, REGION));
+        assertEquals("InvalidArgumentException", otherRegion.getErrorCode());
+
+        service.deregisterStreamConsumer(null, null, consumerArn, REGION);
+        request.put("ResourceARN", consumerArn);
+        AwsException deleted = assertThrows(AwsException.class,
+                () -> handler.handle("ListTagsForResource", request, REGION));
+        assertEquals("ResourceNotFoundException", deleted.getErrorCode());
+    }
+
+    @Test
+    void resourceTagsEnforceCapacityWithoutPartialWrites() {
+        createStream("test-stream");
+        ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN);
+        ObjectNode tags = request.putObject("Tags");
+        for (int i = 0; i < 50; i++) {
+            tags.put("key" + i, "value");
+        }
+        assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
+
+        request.set("Tags", MAPPER.createObjectNode().put("overflow", "value"));
+        AwsException overLimit = assertThrows(AwsException.class,
+                () -> handler.handle("TagResource", request, REGION));
+        assertEquals("LimitExceededException", overLimit.getErrorCode());
+        ObjectNode list = MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN);
+        assertEquals(50, responseEntity(handler.handle("ListTagsForResource", list, REGION)).path("Tags").size());
+
+        request.set("Tags", MAPPER.createObjectNode().put("key0", "updated"));
+        assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
+        assertEquals("updated", tagValue(responseEntity(handler.handle("ListTagsForResource", list, REGION))
+                .path("Tags"), "key0"));
+    }
+
+    @Test
+    void tagResourceRejectsInvalidCharactersWithoutChangingEitherResource() {
+        createStream("test-stream");
+        String consumerArn = service.registerStreamConsumer(STREAM_ARN, "tagged-consumer", REGION)
+                .getConsumerArn();
+        for (String arn : List.of(STREAM_ARN, consumerArn)) {
+            ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", arn);
+            request.putObject("Tags").put("valid", "initial");
+            assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
+
+            for (String key : List.of("bad*key")) {
+                request.set("Tags", MAPPER.createObjectNode().put(key, "value"));
+                AwsException badKey = assertThrows(AwsException.class,
+                        () -> handler.handle("TagResource", request, REGION));
+                assertEquals("InvalidArgumentException", badKey.getErrorCode());
+            }
+
+            for (String value : List.of("bad*value")) {
+                request.set("Tags", MAPPER.createObjectNode().put("valid", value));
+                AwsException badValue = assertThrows(AwsException.class,
+                        () -> handler.handle("TagResource", request, REGION));
+                assertEquals("InvalidArgumentException", badValue.getErrorCode());
+            }
+
+            JsonNode tags = responseEntity(handler.handle("ListTagsForResource",
+                    MAPPER.createObjectNode().put("ResourceARN", arn), REGION)).path("Tags");
+            assertEquals(1, tags.size());
+            assertEquals("initial", tagValue(tags, "valid"));
+        }
+    }
+
+    @Test
+    void tagResourceAcceptsDocumentedUnicodeAndSymbols() {
+        createStream("test-stream");
+        String consumerArn = service.registerStreamConsumer(STREAM_ARN, "tagged-consumer", REGION)
+                .getConsumerArn();
+        String key = "\u00c9quipe_./=+@-:%9";
+        String value = "\u7a7a \u767d%:";
+        for (String arn : List.of(STREAM_ARN, consumerArn)) {
+            ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", arn);
+            request.putObject("Tags").put(key, value);
+            assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
+            JsonNode tags = responseEntity(handler.handle("ListTagsForResource",
+                    MAPPER.createObjectNode().put("ResourceARN", arn), REGION)).path("Tags");
+            assertEquals(value, tagValue(tags, key));
+        }
+    }
+
+    @Test
+    void tagResourceRejectsReservedTagKeyPrefix() {
+        createStream("test-stream");
+        String consumerArn = service.registerStreamConsumer(STREAM_ARN, "tagged-consumer", REGION)
+                .getConsumerArn();
+        for (String arn : List.of(STREAM_ARN, consumerArn)) {
+            ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", arn);
+            request.putObject("Tags").put("AWS:owner", "user");
+            AwsException reserved = assertThrows(AwsException.class,
+                    () -> handler.handle("TagResource", request, REGION));
+            assertEquals("InvalidArgumentException", reserved.getErrorCode());
+            assertEquals(0, responseEntity(handler.handle("ListTagsForResource",
+                    MAPPER.createObjectNode().put("ResourceARN", arn), REGION)).path("Tags").size());
+        }
+    }
+
+    @Test
+    void tagResourceUpdatesLegacyStreamBeyondCapacityWithoutAddingKeys() {
+        createStream("test-stream");
+        // A stream persisted before AddTagsToStream enforced the limit can already have 51 tags.
+        Map<String, String> legacyTags = service.describeStream("test-stream", REGION).getTags();
+        for (int i = 0; i < 51; i++) {
+            legacyTags.put("key" + i, "old");
+        }
+
+        ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN);
+        request.putObject("Tags").put("key0", "updated");
+        assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
+
+        request.set("Tags", MAPPER.createObjectNode().put("key1", "would-change").put("new", "value"));
+        AwsException overLimit = assertThrows(AwsException.class,
+                () -> handler.handle("TagResource", request, REGION));
+        assertEquals("LimitExceededException", overLimit.getErrorCode());
+        JsonNode tags = responseEntity(handler.handle("ListTagsForResource",
+                MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN), REGION)).path("Tags");
+        assertEquals(51, tags.size());
+        assertEquals("updated", tagValue(tags, "key0"));
+        assertEquals("old", tagValue(tags, "key1"));
+    }
+
+    @Test
+    void addTagsToStreamRejectsNewKeysBeyondFiftyWithoutChangingExistingValues() {
+        createStream("test-stream");
+        for (int batch = 0; batch < 5; batch++) {
+            ObjectNode add = MAPPER.createObjectNode().put("StreamName", "test-stream");
+            ObjectNode tags = add.putObject("Tags");
+            for (int i = batch * 10; i < (batch + 1) * 10; i++) {
+                tags.put("key" + i, "old");
+            }
+            assertEquals(200, handler.handle("AddTagsToStream", add, REGION).getStatus());
+        }
+
+        ObjectNode update = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        update.putObject("Tags").put("key0", "updated");
+        assertEquals(200, handler.handle("AddTagsToStream", update, REGION).getStatus());
+
+        ObjectNode overflow = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        overflow.putObject("Tags").put("key1", "would-change").put("key50", "new");
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("AddTagsToStream", overflow, REGION));
+        assertEquals("LimitExceededException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        Map<String, String> stored = service.listTagsForStream("test-stream", REGION);
+        assertEquals(50, stored.size());
+        assertEquals("updated", stored.get("key0"));
+        assertEquals("old", stored.get("key1"));
+        assertFalse(stored.containsKey("key50"));
+    }
+
+    private static Stream<Arguments> rejectedRegistrationTags() {
+        ObjectNode tooManyTags = MAPPER.createObjectNode();
+        for (int i = 0; i < 51; i++) {
+            tooManyTags.put("key" + i, "value");
+        }
+        return Stream.of(
+                Arguments.of("empty map", MAPPER.createObjectNode(), "InvalidArgumentException"),
+                Arguments.of("invalid key", MAPPER.createObjectNode().put("bad*key", "value"),
+                        "InvalidArgumentException"),
+                Arguments.of("reserved prefix", MAPPER.createObjectNode().put("aws:owner", "user"),
+                        "InvalidArgumentException"),
+                Arguments.of("over capacity", tooManyTags, "LimitExceededException"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("rejectedRegistrationTags")
+    void invalidRegistrationTagsDoNotCreateConsumer(String scenario, JsonNode tags, String errorCode) {
+        createStream("test-stream");
+        ObjectNode request = MAPPER.createObjectNode()
+                .put("StreamARN", STREAM_ARN)
+                .put("ConsumerName", "tagged-consumer");
+        request.set("Tags", tags);
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterStreamConsumer", request, REGION));
+        assertEquals(errorCode, error.getErrorCode());
+        assertTrue(service.listStreamConsumers(STREAM_ARN, REGION).isEmpty());
+    }
+
+    private String tagValue(JsonNode tags, String key) {
+        for (JsonNode tag : tags) {
+            if (key.equals(tag.path("Key").asText())) {
+                return tag.path("Value").asText();
+            }
+        }
+        return null;
+    }
+
     private ObjectNode responseEntity(Response response) {
         return (ObjectNode) response.getEntity();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"PutRecord", "PutRecords"})
-    void writesReportAnOpenDescendantAfterRepeatedSplits(String action) {
+    void writesReportTheOpenHashRangeAfterRepeatedSplits(String action) {
         createStream("test-stream");
         KinesisStream stream = service.describeStream("test-stream", REGION);
         service.splitShard("test-stream", FIRST_SHARD_ID,
@@ -154,19 +424,19 @@ class KinesisJsonHandlerTest {
         ObjectNode response = responseEntity(handler.handle(action, request, REGION));
         JsonNode result = "PutRecords".equals(action) ? response.path("Records").get(0) : response;
 
-        assertEquals(stream.getShards().get(3).getShardId(), result.path("ShardId").asText());
+        assertEquals(stream.getShards().get(5).getShardId(), result.path("ShardId").asText());
         assertFalse(result.path("SequenceNumber").asText().isEmpty());
         if ("PutRecords".equals(action)) {
             assertEquals(0, response.path("FailedRecordCount").asInt());
         }
-        assertEquals(1, stream.getShards().get(3).recordCount());
+        assertEquals(1, stream.getShards().get(5).recordCount());
         assertTrue(stream.getShards().stream().filter(KinesisShard::isClosed)
                 .allMatch(shard -> shard.recordCount() == 0));
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"PutRecord", "PutRecords"})
-    void writesFailWithoutAppendingWhenNoOpenDescendantExists(String action) {
+    void writesFailWithoutAppendingWhenNoOpenShardCoversHash(String action) {
         createStream("test-stream");
         KinesisShard shard = service.describeStream("test-stream", REGION).getShards().getFirst();
         shard.setClosed(true);
@@ -740,6 +1010,94 @@ class KinesisJsonHandlerTest {
         req.put("ExplicitHashKey", MIN_HASH_KEY);
         ObjectNode respMin = responseEntity(handler.handle("PutRecord", req, REGION));
         assertEquals(FIRST_SHARD_ID, respMin.get("ShardId").asText());
+    }
+
+    @Test
+    void ordinaryPartitionKeysUseMd5HashRangesReportedByListShards() {
+        createStream("md5-routing", TWO_SHARDS);
+        ObjectNode list = MAPPER.createObjectNode().put("StreamName", "md5-routing");
+        ArrayNode shards = (ArrayNode) responseEntity(handler.handle("ListShards", list, REGION)).get("Shards");
+
+        ObjectNode put = MAPPER.createObjectNode()
+                .put("StreamName", "md5-routing")
+                .put("Data", "dGVzdA==")
+                .put("PartitionKey", "pk-0");
+        String singleShard = responseEntity(handler.handle("PutRecord", put, REGION)).get("ShardId").asText();
+        assertEquals(shardForMd5Hash(shards, "EFFC8E8920E4EE5505B7F963C5D72F6D"), singleShard);
+
+        ObjectNode batch = MAPPER.createObjectNode().put("StreamName", "md5-routing");
+        ArrayNode records = batch.putArray("Records");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "a");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "b");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "é-0");
+        ArrayNode results = (ArrayNode) responseEntity(handler.handle("PutRecords", batch, REGION)).get("Records");
+        assertEquals(shardForMd5Hash(shards, "0CC175B9C0F1B6A831C399E269772661"),
+                results.get(0).get("ShardId").asText());
+        assertEquals(shardForMd5Hash(shards, "92EB5FFEE6AE2FEC3AD71C777531578F"),
+                results.get(1).get("ShardId").asText());
+        assertEquals(shardForMd5Hash(shards, "2F6923E2AAC1CFC8729E5C892BBE2244"),
+                results.get(2).get("ShardId").asText());
+    }
+
+    @Test
+    void ordinaryPartitionKeyNormalizesLegacyOverlappingShardRanges() {
+        createStream("legacy-md5-routing", TWO_SHARDS);
+        KinesisStream stream = service.describeStream("legacy-md5-routing", REGION);
+        for (KinesisShard shard : stream.getShards()) {
+            shard.setHashKeyRange(new KinesisShard.HashKeyRange(MIN_HASH_KEY, MAX_HASH_KEY));
+        }
+
+        ObjectNode put = MAPPER.createObjectNode()
+                .put("StreamName", "legacy-md5-routing")
+                .put("Data", "dGVzdA==")
+                .put("PartitionKey", "pk-0");
+        assertEquals(SECOND_SHARD_ID,
+                responseEntity(handler.handle("PutRecord", put, REGION)).get("ShardId").asText());
+        assertEquals(MIN_HASH_KEY, stream.getShards().getFirst().getHashKeyRange().startingHashKey());
+        assertEquals(MAX_HASH_KEY, stream.getShards().get(1).getHashKeyRange().endingHashKey());
+    }
+
+    @Test
+    void putRecordsDoesNotRescanEveryShardForEachEntry() {
+        KinesisStream stream = service.createStream("indexed-routing", 256, REGION);
+        AtomicInteger rangeReads = new AtomicInteger();
+        List<KinesisShard> counted = new ArrayList<>();
+        for (KinesisShard shard : stream.getShards()) {
+            counted.add(new KinesisShard(shard.getShardId(),
+                    shard.getHashKeyRange().startingHashKey(), shard.getHashKeyRange().endingHashKey(),
+                    shard.getSequenceNumberRange().startingSequenceNumber()) {
+                @Override
+                public HashKeyRange getHashKeyRange() {
+                    rangeReads.incrementAndGet();
+                    return super.getHashKeyRange();
+                }
+            });
+        }
+        stream.setShards(counted);
+
+        ObjectNode batch = MAPPER.createObjectNode().put("StreamName", "indexed-routing");
+        ArrayNode records = batch.putArray("Records");
+        for (int i = 0; i < 100; i++) {
+            records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk-" + i);
+        }
+
+        ObjectNode result = responseEntity(handler.handle("PutRecords", batch, REGION));
+
+        assertEquals(0, result.path("FailedRecordCount").asInt());
+        assertEquals(100, result.path("Records").size());
+        assertTrue(rangeReads.get() < 8_000, () -> "Shard range reads: " + rangeReads.get());
+    }
+
+    private static String shardForMd5Hash(ArrayNode shards, String md5Hex) {
+        BigInteger hash = new BigInteger(md5Hex, 16);
+        for (JsonNode shard : shards) {
+            BigInteger start = new BigInteger(shard.path("HashKeyRange").path("StartingHashKey").asText());
+            BigInteger end = new BigInteger(shard.path("HashKeyRange").path("EndingHashKey").asText());
+            if (hash.compareTo(start) >= 0 && hash.compareTo(end) <= 0) {
+                return shard.path("ShardId").asText();
+            }
+        }
+        throw new AssertionError("No shard covers MD5 hash " + md5Hex);
     }
 
     @Test

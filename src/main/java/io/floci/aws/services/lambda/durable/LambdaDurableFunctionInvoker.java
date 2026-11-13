@@ -30,7 +30,8 @@ public class LambdaDurableFunctionInvoker implements DurableFunctionInvoker {
         return new ResolvedDurableTarget(accountId, region, fn.getFunctionName(), qualifiedArn, version,
                 fn.isDurable(),
                 fn.getDurableExecutionTimeout() != null ? fn.getDurableExecutionTimeout() : 0,
-                fn.getDurableRetentionPeriodInDays() != null ? fn.getDurableRetentionPeriodInDays() : 0);
+                fn.getDurableRetentionPeriodInDays() != null ? fn.getDurableRetentionPeriodInDays() : 0,
+                "Active".equals(fn.getTracingMode()));
     }
 
     /**
@@ -39,11 +40,13 @@ public class LambdaDurableFunctionInvoker implements DurableFunctionInvoker {
      * execution's qualified ARN, since a durable function is only ever invoked qualified.
      */
     @Override
-    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId) {
+    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
+                                             String traceId) {
         LambdaFunction fn = targetResolver.resolveInvokeTargetForAccount(target.accountId(), target.region(),
                 target.functionName(), target.version());
         InvokeResult result = RequestScopes.callAs(target.accountId(),
-                () -> executorService.invoke(fn, payload, InvocationType.RequestResponse, target.version(), requestId));
+                () -> executorService.invoke(fn, payload, InvocationType.RequestResponse, target.version(), requestId,
+                        traceId));
         return new DurableInvocationResult(result.getRequestId(), result.getPayload(), result.getFunctionError());
     }
 }

@@ -127,11 +127,13 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `DescribeClusters` | List clusters and their connection details |
 | `DeleteCluster` | Create the requested final snapshot, then remove the cluster; accepts `SkipFinalClusterSnapshot` to delete without a backup |
 | `CreateClusterSnapshot` | Back up a cluster to a SQL dump via `pg_dump` |
-| `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier and SnapshotType (manual or automated) |
+| `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier and SnapshotType (manual or automated). Every snapshot reports `OwnerAccount` and `AccountsWithRestoreAccess`. With `OwnerAccount` set to another account, only the snapshots that account has authorized the caller to restore are listed, and naming one that is not shared is `ClusterSnapshotNotFound` |
+| `AuthorizeSnapshotAccess` | Let another account restore a manual, available snapshot (`AccountWithRestoreAccess`, a 12 digit account id). Authorizing an account twice is `AuthorizationAlreadyExists` |
+| `RevokeSnapshotAccess` | Take the restore access of an account away; the next restore by it is refused. An account that was not authorized is `AuthorizationNotFound` |
 | `DeleteClusterSnapshot` | Remove a snapshot and its stored dump |
 | `ModifyClusterSnapshot` | Update the retention period of a manual cluster snapshot |
 | `CopyClusterSnapshot` | Copy an automated cluster snapshot to a manual snapshot with a new identifier and retention period |
-| `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-account, same-region `SnapshotArn` |
+| `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-region `SnapshotArn`. `OwnerAccount`, or a `SnapshotArn` of another account, restores a snapshot that account has authorized the caller to restore, and is refused with `AccessToSnapshotDenied` otherwise; the dump is read from the owner's directory and the cluster is created in the caller's account |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
 | `DescribeClusterParameterGroups` | List parameter groups, optionally filtered by name |
 | `DescribeClusterParameters` | Return the parameters of a group, with any values set by `ModifyClusterParameterGroup` |
@@ -476,6 +478,52 @@ approximation to indicate that initial backfill is in progress); it becomes `act
 exhausted. The landing table is an append-only log, so an item changed while its table is still being
 backfilled can appear twice: once from the scan and once from the stream.
 
+#### Current-state table
+
+Beside the landing log, the integration projects the source table's current item state into a table
+shaped as AWS shapes it: in the target database's `public` schema, under the DynamoDB table's name,
+with one column per key attribute and a `value` column holding the whole item in DynamoDB JSON. AWS
+types `value` as SUPER. Floci's data plane is PostgreSQL, so `value` is `jsonb` and a path is read with
+the JSON operators: `value->'payload'->'L'->0->>'S'` here is `"value"."payload"."L"[0]."S"` on Redshift.
+
+```sql
+SELECT id, value->'note'->>'S' AS note FROM public."orders";
+```
+
+- Key columns take the DynamoDB key types: `S` is `TEXT`, `N` is an unbounded `NUMERIC`, which holds
+  every DynamoDB number exactly where AWS's `NUMERIC(38,18)` would round or overflow, `B` is `BYTEA`. The
+  partition key comes first, then the sort key, and together they are the primary key. Every other
+  attribute lives only in `value`, so items of differing shape need no schema change.
+- The backfill scan upserts each item it reads. A stream record names a key, and the key is projected as
+  the source holds it at that moment: the item is upserted, or deleted when the source no longer has it.
+  The record's own images, and its event type, are not used, so a record replayed after the scan read a
+  newer version of its item, or after the item changed again, cannot put an older image over the newer
+  row: every record of a key projects the same state, and a batch projects each key once. The cost is one
+  `GetItem` per key per batch, and the table shows each key's latest state, not every intermediate one,
+  as AWS's incremental exports do. AWS refreshes every 15 to 30 minutes; Floci applies each poll.
+- Changes are applied after the batch has landed, in one transaction. The projection is idempotent, so an
+  item projected twice, once from the scan and once from the stream, leaves the same state.
+- The integration marks its table as its own, with a comment naming the integration
+  (`floci-zetl-integration:<integration-id>`, see `obj_description`). A table that an earlier integration
+  of the source marked is dropped and made afresh by the next one, so an item deleted from the source in
+  between does not survive and a source made again with other keys, or the same key name under another
+  type, does not meet its predecessor's columns. A table nobody marked, one the user already has under that
+  name, is refused and left alone, and so is one that another integration still running marked (two
+  sources sharing a table name, such as the same name in two Regions, cannot share one target table).
+- The current-state table never holds back the landing log. A projection that cannot be written (a
+  refused table, a table dropped under the integration, an unreachable target) is logged as a warning
+  once, and the integration keeps landing and checkpointing its records. Each poll tries to make the table
+  again, and once it can, the backfill starts over (`syncing`) and the scan fills it, since changes that
+  landed in the meantime never reached it. A table dropped and made again while the integration runs is
+  filled the same way.
+- A table name or key column name longer than 63 bytes is refused. AWS accepts up to 127 characters, but
+  PostgreSQL truncates identifiers past 63 bytes, so two longer names could silently share a table.
+- The table lives in the same database as the user's own tables (`dev` on a cluster, the namespace's
+  database on Serverless), not in a database created from the integration, and is kept when the
+  integration is deleted, as AWS keeps replicated data.
+- An integration persisted before this table existed scans its source again at the next start to fill
+  it; the landing log keeps each event once, so the rerun adds no rows there.
+
 ### S3 event integrations
 
 `CreateIntegration` also takes an Amazon S3 bucket as the source (`arn:aws:s3:::<bucket>`), the first step of
@@ -555,7 +603,7 @@ data-type, pause and resume, serverless restore and modification events do not o
 is best effort. It is skipped when the EventBridge service is disabled, a refused or failed
 delivery is logged, and neither changes the outcome of the Redshift operation.
 
-Schema inference, relational projection and `CREATE DATABASE ... FROM INTEGRATION` are not
+`CREATE DATABASE ... FROM INTEGRATION`, history mode and `SVV_INTEGRATION*` views are not
 supported, and a provisioned cluster's namespace ARN (`arn:aws:redshift:<region>:<account>:namespace:<id>`)
 is not accepted as a target.
 
@@ -616,7 +664,13 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
   update both the cluster's master password and its secret value; rotation requires an available
   cluster and does not use a Lambda function.
 - Snapshot restoration has the same limitations as `RestoreFromClusterSnapshot`: snapshots are
-  local SQL dumps, not cross-account backups or a full Redshift engine image.
+  local SQL dumps, not a full Redshift engine image.
+- Snapshot sharing is recorded on the snapshot. `AuthorizeSnapshotAccess` adds the account to
+  `AccountsWithRestoreAccess` and `RevokeSnapshotAccess` removes it, so a snapshot deleted and taken again under
+  the same name starts with no grant. Only a manual, available snapshot can be shared. A shared snapshot can be
+  described and restored by the account it is shared with, and by no other action. The caller's own identity
+  policies are the IAM filter's to check when IAM enforcement is on. KMS key grants are not checked, and a
+  snapshot copied to another Region is shared only through the Region it was taken in.
 - `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
 
 ## Configuration
