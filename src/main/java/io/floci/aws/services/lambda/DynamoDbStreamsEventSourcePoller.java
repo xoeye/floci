@@ -32,6 +32,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 
@@ -55,7 +56,13 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
     private final long pollIntervalMs;
     private final LongSupplier clock;
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
+    /** ESM uuids whose shard listing is in flight. */
     final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
+    /**
+     * {@code uuid:shardId} of shards with a batch in flight. Like Lambda with a ParallelizationFactor of 1,
+     * each shard has at most one batch in flight and the shards of a stream are processed concurrently.
+     */
+    final ConcurrentHashMap<String, Boolean> activeShardPolls = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Integer> retryCounts = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> retryNotBefore = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Integer> bisectLimits = new ConcurrentHashMap<>();
@@ -189,10 +196,14 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         quiesced = pollExecutor.isShutdown();
     }
 
+    /**
+     * Forgets every mapping's polling state. {@code activePolls} and {@code activeShardPolls} are left alone:
+     * each marks a running worker, which removes it when it finishes, so a shard never gets a second batch
+     * in flight while a batch started before the reset is still being invoked.
+     */
     public void clear() {
         timerIds.values().forEach(vertx::cancelTimer);
         timerIds.clear();
-        activePolls.clear();
         stopped.clear();
         retryCounts.clear();
         retryNotBefore.clear();
@@ -257,10 +268,8 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                         .map(DynamoDbStreamReader.Shard::shardId)
                         .filter(shardId -> finishedShards.contains(finishedShardKey(esm.getUuid(), shardId)))
                         .collect(Collectors.toSet());
-                // ponytail: a shard whose read or invoke throws ends the tick for the shards after it; the next
-                // tick starts over from committed progress, so it only delays them.
                 for (DynamoDbStreamReader.Shard shard : DynamoDbStreamReader.readable(shards, finished)) {
-                    pollShard(esm, fn, stream, shard.shardId());
+                    submitShardPoll(esm, fn, stream, shard.shardId());
                 }
             } catch (Exception e) {
                 LOG.warnv("DynamoDB Streams ESM {0} poll error: {1}", esm.getUuid(), e.getMessage());
@@ -270,9 +279,35 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         });
     }
 
+    /**
+     * Polls one shard on its own thread unless that shard already has a batch in flight. A shard whose
+     * read or invoke throws delays only itself: the next tick resumes it from committed progress.
+     */
+    private void submitShardPoll(EventSourceMapping esm, LambdaFunction fn, DynamoDbStreamReader.Stream stream,
+                                 String shardId) {
+        String key = finishedShardKey(esm.getUuid(), shardId);
+        if (activeShardPolls.putIfAbsent(key, Boolean.TRUE) != null) {
+            return;
+        }
+        try {
+            pollExecutor.submit(() -> {
+                try {
+                    pollShard(esm, fn, stream, shardId);
+                } catch (Exception e) {
+                    LOG.warnv("DynamoDB Streams ESM {0} shard {1} poll error: {2}",
+                            esm.getUuid(), shardId, e.getMessage());
+                } finally {
+                    activeShardPolls.remove(key);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            activeShardPolls.remove(key);
+        }
+    }
+
     private void pollShard(EventSourceMapping esm, LambdaFunction fn, DynamoDbStreamReader.Stream stream,
                            String shardId) {
-        String lastSeq = esm.getShardSequenceNumbers().get(shardId);
+        String lastSeq = checkpoint(esm, shardId);
         String persistedKey = StreamBatchFailures.batchStateKey(esm.getUuid(), shardId, lastSeq);
 
         boolean checkpointTrimmed = false;
@@ -612,6 +647,11 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
             ((ObjectNode) item.get("dynamodb")).put("ApproximateCreationDateTime", created.asDouble());
         }
         return item;
+    }
+
+    /** Read under the monitor: concurrent shard polls of one mapping share its checkpoint map. */
+    private synchronized String checkpoint(EventSourceMapping esm, String shardId) {
+        return esm.getShardSequenceNumbers().get(shardId);
     }
 
     private synchronized void advanceCheckpoint(EventSourceMapping esm, String shardId, String newestSeq) {

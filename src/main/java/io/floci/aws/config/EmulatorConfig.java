@@ -1631,6 +1631,16 @@ public interface EmulatorConfig {
         /** Env: FLOCI_SERVICES_DYNAMODB_LOCAL_REQUEST_TIMEOUT_SECONDS. */
         @WithDefault("10")
         int localRequestTimeoutSeconds();
+
+        /**
+         * Number of shards each DynamoDB stream is split into. Real AWS tables start with four
+         * shards and scale with throughput; setting this higher lets Lambda event source mappings
+         * process stream records in parallel across shards, which matters for integration-test
+         * workloads that create many items concurrently.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_COUNT
+         */
+        @WithDefault("1")
+        int streamShardCount();
     }
 
     interface SnsServiceConfig {

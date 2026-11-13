@@ -146,6 +146,13 @@ Stream records are held in memory. `POST /_floci/state/reset` removes every stre
 tables, so `ListStreams` and `DescribeStream` no longer return the streams of tables created before
 the reset.
 
+By default each stream has one shard. Set `FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_COUNT` to create
+multiple shards per stream. Records are assigned to shards by hashing the partition key, so items
+with the same key always land on the same shard, preserving per-item ordering. A Lambda event source
+mapping invokes its function for each shard concurrently, with at most one batch in flight per shard,
+as Lambda does with a `ParallelizationFactor` of 1. A shard's next batch starts only after its current
+batch returns, so records of one shard are delivered in order.
+
 ## Time to Live
 
 With TTL enabled, a sweep runs every 60 seconds and deletes the items whose TTL attribute holds an
@@ -277,6 +284,7 @@ region is rejected.
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | *(none)* | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_REQUEST_TIMEOUT_SECONDS` | `10` | Seconds to wait for DynamoDB Local to answer a forwarded request |
+| `FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_COUNT` | `1` | Number of shards each DynamoDB stream is split into. Real AWS tables start with four shards and scale with throughput. Setting this higher lets Lambda event source mappings process stream records in parallel across shards, which matters for integration-test workloads that create many items concurrently. Records are assigned to shards by hashing the partition key, so items with the same key always land on the same shard |
 
 ### Storage and Performance
 

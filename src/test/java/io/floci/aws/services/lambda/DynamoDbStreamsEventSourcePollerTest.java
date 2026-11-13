@@ -320,8 +320,8 @@ class DynamoDbStreamsEventSourcePollerTest {
     }
 
     /**
-     * Hard happens-after barrier: re-kick until a SECOND fetch is observed. {@code activePolls} serializes
-     * polls per ESM, so fetch #2 cannot begin until poll #1's finally-block ran, so poll #1 is fully complete.
+     * Hard happens-after barrier: re-kick until a SECOND fetch is observed. {@code activeShardPolls} serializes
+     * polls per shard, so fetch #2 cannot begin until poll #1's finally-block ran, so poll #1 is fully complete.
      */
     private void awaitPollCompletedViaSecondFetch(DynamoDbStreamsEventSourcePoller p, EventSourceMapping esm) {
         long deadline = System.currentTimeMillis() + 5000;
@@ -823,10 +823,10 @@ class DynamoDbStreamsEventSourcePollerTest {
         p.pollAndInvoke(esm);
         // Verify invoke was called for attempt 1
         verify(executorService, timeout(2000)).invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse));
-        // Wait for poll 1 to finish by ensuring activePolls is released
+        // Wait for poll 1 to finish by ensuring its listing and shard polls are released
         long deadline = System.currentTimeMillis() + 3000;
         while (System.currentTimeMillis() < deadline) {
-            if (p.activePolls.isEmpty()) {
+            if (idle(p)) {
                 break;
             }
             Thread.sleep(25);
@@ -1085,7 +1085,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         long deadline = System.currentTimeMillis() + 3000;
         while (System.currentTimeMillis() < deadline) {
-            if (p.activePolls.isEmpty()) {
+            if (idle(p)) {
                 break;
             }
             Thread.sleep(25);
@@ -1141,7 +1141,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         long deadline = System.currentTimeMillis() + 3000;
         while (System.currentTimeMillis() < deadline) {
-            if (p.activePolls.isEmpty()) {
+            if (idle(p)) {
                 break;
             }
             Thread.sleep(25);
@@ -1260,7 +1260,7 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         long deadline = System.currentTimeMillis() + 3000;
         while (System.currentTimeMillis() < deadline) {
-            if (p.activePolls.isEmpty()) {
+            if (idle(p)) {
                 break;
             }
             Thread.sleep(25);
@@ -2115,8 +2115,6 @@ class DynamoDbStreamsEventSourcePollerTest {
         poller.clear();
         EventSourceMapping recreated = streamsEsm("esm-new", null);
         esmStore.saveForAccount(ACCOUNT_ID, recreated);
-        // clear() forgot the in-flight poll; re-mark it so awaitPollCompleted waits for the old worker.
-        poller.activePolls.put(old.getUuid(), Boolean.TRUE);
         release.countDown();
         awaitPollCompleted(poller);
 
@@ -2168,6 +2166,66 @@ class DynamoDbStreamsEventSourcePollerTest {
 
         verify(streams, times(3)).getShardIterator(any(), eq("parent"), any(), any());
         verify(streams, never()).getShardIterator(any(), eq("child"), any(), any());
+    }
+
+    @Test
+    void theShardsOfAMappingAreInvokedConcurrently() throws Exception {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        streams.shard("a", null).add(ddbRecord("a1", "INSERT", "{}"));
+        streams.shard("b", null).add(ddbRecord("b1", "INSERT", "{}"));
+        stubFunction();
+        CountDownLatch bothInvoking = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        stubBlockingInvoke(bothInvoking, release, new InvokeResult());
+        EventSourceMapping esm = streamsEsm("esm-shards", null);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        DynamoDbStreamsEventSourcePoller p = pollerOver(streams, esmStore);
+
+        p.pollAndInvoke(esm);
+
+        assertTrue(bothInvoking.await(2, TimeUnit.SECONDS),
+                "one shard's batch waited for the other shard's invocation to return");
+        release.countDown();
+        awaitPollCompleted(p);
+        assertEquals(Map.of("a", "a1", "b", "b1"), esm.getShardSequenceNumbers());
+    }
+
+    @Test
+    void aShardGetsItsNextBatchOnlyAfterItsBatchInFlightReturns() throws Exception {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        streams.shard("a", null).addAll(List.of(ddbRecord("a1", "INSERT", "{}"), ddbRecord("a2", "INSERT", "{}")));
+        stubFunction();
+        List<String> delivered = new CopyOnWriteArrayList<>();
+        CountDownLatch invoking = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(executorService.invoke(any(), any(byte[].class), eq(InvocationType.RequestResponse))).thenAnswer(inv -> {
+            readRecords(inv.getArgument(1)).forEach(r -> delivered.add(r.path("dynamodb").path("SequenceNumber").asText()));
+            invoking.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return new InvokeResult();
+        });
+        EventSourceMapping esm = streamsEsm("esm-one-batch", null);
+        esm.setBatchSize(1);
+        esmStore.saveForAccount(ACCOUNT_ID, esm);
+        DynamoDbStreamsEventSourcePoller p = pollerOver(streams, esmStore);
+
+        p.pollAndInvoke(esm);
+        assertTrue(invoking.await(2, TimeUnit.SECONDS));
+        // Each tick lists the shards to its end while a1 is still being invoked.
+        for (int tick = 0; tick < 3; tick++) {
+            p.pollAndInvoke(esm);
+            long deadline = System.currentTimeMillis() + 2_000;
+            while (!p.activePolls.isEmpty() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(5);
+            }
+            assertTrue(p.activePolls.isEmpty(), "tick did not finish listing the shards");
+        }
+        assertEquals(List.of("a1"), delivered, "a second batch started on a shard with a batch in flight");
+
+        release.countDown();
+        awaitPollCompleted(p);
+        pollOnce(p, esm);
+        assertEquals(List.of("a1", "a2"), delivered);
     }
 
     @Test
@@ -2252,10 +2310,18 @@ class DynamoDbStreamsEventSourcePollerTest {
 
     private void awaitPollCompleted(DynamoDbStreamsEventSourcePoller poller) throws InterruptedException {
         long deadline = System.currentTimeMillis() + 3_000;
-        while (!poller.activePolls.isEmpty() && System.currentTimeMillis() < deadline) {
+        while (!idle(poller) && System.currentTimeMillis() < deadline) {
             Thread.sleep(25);
         }
-        assertTrue(poller.activePolls.isEmpty(), "poll did not complete before the test timeout");
+        assertTrue(idle(poller), "poll did not complete before the test timeout");
+    }
+
+    /**
+     * No listing and no shard poll in flight. The listing registers each shard poll before it releases
+     * {@code activePolls}, so checking {@code activePolls} first cannot miss a shard poll it started.
+     */
+    private static boolean idle(DynamoDbStreamsEventSourcePoller poller) {
+        return poller.activePolls.isEmpty() && poller.activeShardPolls.isEmpty();
     }
 
     private JsonNode readRecords(byte[] payload) {
