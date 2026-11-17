@@ -1545,7 +1545,9 @@ class DynamoDbStreamsEventSourcePollerTest {
         stream.add(ddbRecord("s9", "INSERT", "{}"));
         pollOnce(p, esm);
 
-        assertEquals(List.of("s5", "s6", "s7", "s8", "s9"), invocations.get(1),
+        // The second poll drains past the filtered window into a full-size fetch of [s5..s8].
+        assertEquals(List.of(List.of("s5", "s6", "s7", "s8"), List.of("s5", "s6", "s7", "s8"),
+                        List.of("s5", "s6", "s7", "s8", "s9")), invocations,
                 "the trimmed checkpoint refetches the horizon at the full BatchSize");
     }
 
@@ -1580,6 +1582,65 @@ class DynamoDbStreamsEventSourcePollerTest {
         assertEquals(List.of(List.of("s1", "s2", "s3", "s4"), List.of("s1", "s2", "s3", "s4")), invocations);
     }
 
+    /** As Lambda does, a poll keeps reading the shard after each consumed batch until it is drained. */
+    @Test
+    void onePollDeliversConsecutiveBatchesUntilTheShardIsDrained() throws Exception {
+        stubStream("s1", "s2", "s3", "s4", "s5");
+        List<List<String>> invocations = recordInvocations(seqs -> new InvokeResult());
+        EventSourceMapping esm = filterEsm();
+        esm.setBatchSize(2);
+        DynamoDbStreamsEventSourcePoller p = pollerWith(mock(EsmStore.class));
+
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("s1", "s2"), List.of("s3", "s4"), List.of("s5")), invocations);
+        assertEquals("s5", checkpoint(esm));
+    }
+
+    @Test
+    void onePollTakesABatchFromEachShardInTurnSoABusyShardDoesNotHoldUpTheOthers() throws Exception {
+        stubFunction();
+        List<List<String>> invocations = recordInvocations(seqs -> new InvokeResult());
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        List<DynamoDbStreamReader.Record> busy = streams.shard("busy", null);
+        for (String seq : List.of("a1", "a2", "a3", "a4", "a5")) {
+            busy.add(ddbRecord(seq, "INSERT", "{}"));
+        }
+        streams.shard("quiet", null).add(ddbRecord("b1", "INSERT", "{}"));
+        EventSourceMapping esm = filterEsm();
+        esm.setBatchSize(2);
+        DynamoDbStreamsEventSourcePoller p = pollerOver(streams, esmStore);
+
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("a1", "a2"), List.of("b1"), List.of("a3", "a4"), List.of("a5")), invocations);
+    }
+
+    @Test
+    void aThrottledShardWaitsForTheNextPollWhileAnotherShardKeepsDraining() throws Exception {
+        stubFunction();
+        List<List<String>> invocations = recordInvocations(seqs -> {
+            if (seqs.contains("b1")) {
+                throw new AwsException("TooManyRequestsException", "Rate exceeded", 429);
+            }
+            return new InvokeResult();
+        });
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        List<DynamoDbStreamReader.Record> busy = streams.shard("busy", null);
+        for (String seq : List.of("a1", "a2", "a3", "a4", "a5")) {
+            busy.add(ddbRecord(seq, "INSERT", "{}"));
+        }
+        streams.shard("throttled", null).add(ddbRecord("b1", "INSERT", "{}"));
+        EventSourceMapping esm = filterEsm();
+        esm.setBatchSize(2);
+        DynamoDbStreamsEventSourcePoller p = pollerOver(streams, esmStore);
+
+        pollOnce(p, esm);
+
+        assertEquals(List.of(List.of("a1", "a2"), List.of("b1"), List.of("a3", "a4"), List.of("a5")), invocations);
+        assertNull(esm.getShardSequenceNumbers().get("throttled"));
+    }
+
     @Test
     void bisectSplitsOnFunctionErrorEvenWithReportBatchItemFailures() throws Exception {
         stubStream("s1", "s2", "s3", "s4");
@@ -1592,7 +1653,8 @@ class DynamoDbStreamsEventSourcePollerTest {
         pollOnce(p, esm);
         pollOnce(p, esm);
 
-        assertEquals(List.of(List.of("s1", "s2", "s3", "s4"), List.of("s1", "s2")), invocations);
+        assertEquals(List.of(List.of("s1", "s2", "s3", "s4"), List.of("s1", "s2"), List.of("s3", "s4")),
+                invocations);
         assertEquals("s2", checkpoint(esm));
     }
 
@@ -2143,7 +2205,6 @@ class DynamoDbStreamsEventSourcePollerTest {
         DynamoDbStreamsEventSourcePoller p = pollerOver(parentAndChild(), esmStore);
 
         pollOnce(p, esm);
-        pollOnce(p, esm);
         assertEquals(List.of(List.of("p1")), invocations,
                 "the parent stays open to the mapping until a read finds no records and no next cursor");
         pollOnce(p, esm);
@@ -2159,7 +2220,6 @@ class DynamoDbStreamsEventSourcePollerTest {
         EventSourceMapping esm = filterEsm();
         FakeStreamReader streams = parentAndChild();
         DynamoDbStreamsEventSourcePoller p = pollerOver(streams, esmStore);
-        pollOnce(p, esm);
         pollOnce(p, esm);
 
         p.stopPolling(esm.getUuid());

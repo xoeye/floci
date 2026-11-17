@@ -25,6 +25,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
@@ -259,8 +260,19 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                         .collect(Collectors.toSet());
                 // ponytail: a shard whose read or invoke throws ends the tick for the shards after it; the next
                 // tick starts over from committed progress, so it only delays them.
-                for (DynamoDbStreamReader.Shard shard : DynamoDbStreamReader.readable(shards, finished)) {
-                    pollShard(esm, fn, stream, shard.shardId());
+                // As Lambda does, read a shard again as soon as a batch is consumed instead of waiting for
+                // the next tick. Each pass takes one batch per shard, so a busy shard does not hold up the
+                // others. A shard leaves the rotation once a poll does not advance it (drained, failed,
+                // throttled or backing off), so it is retried no sooner than the next tick.
+                List<DynamoDbStreamReader.Shard> rotation =
+                        new ArrayList<>(DynamoDbStreamReader.readable(shards, finished));
+                while (!rotation.isEmpty()) {
+                    Iterator<DynamoDbStreamReader.Shard> each = rotation.iterator();
+                    while (each.hasNext()) {
+                        if (!pollShard(esm, fn, stream, each.next().shardId())) {
+                            each.remove();
+                        }
+                    }
                 }
             } catch (Exception e) {
                 LOG.warnv("DynamoDB Streams ESM {0} poll error: {1}", esm.getUuid(), e.getMessage());
@@ -270,8 +282,9 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         });
     }
 
-    private void pollShard(EventSourceMapping esm, LambdaFunction fn, DynamoDbStreamReader.Stream stream,
-                           String shardId) {
+    /** @return whether a batch was consumed and the checkpoint advanced past it, so the shard may hold more */
+    private boolean pollShard(EventSourceMapping esm, LambdaFunction fn, DynamoDbStreamReader.Stream stream,
+                              String shardId) {
         String lastSeq = esm.getShardSequenceNumbers().get(shardId);
         String persistedKey = StreamBatchFailures.batchStateKey(esm.getUuid(), shardId, lastSeq);
 
@@ -305,7 +318,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
             if (page.closed()) {
                 finishedShards.add(finishedShardKey(esm.getUuid(), shardId));
             }
-            return;
+            return false;
         }
         // ponytail: a stop or reset racing this check does not cancel an in-flight invoke; the stop checks in
         // advanceCheckpoint and dispose drop its checkpoint and OnFailure send. Only a stop landing
@@ -314,7 +327,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                 .map(EventSourceMapping::isEnabled)
                 .orElse(false);
         if (quiesced || !enabled) {
-            return;
+            return false;
         }
 
         // Advance to the newest FETCHED record whenever the batch is disposed of, invoked or
@@ -336,13 +349,12 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         String batchKey = StreamBatchFailures.batchStateKey(esm.getUuid(), shardId, checkpointTrimmed ? null : lastSeq);
         if (matched.isEmpty()) {
             clearBatchState(batchKey);
-            advanceCheckpoint(esm, shardId, newestFetchedSeq);
-            return;
+            return advanceCheckpoint(esm, shardId, newestFetchedSeq);
         }
 
         long now = clock.getAsLong();
         if (now < retryNotBefore.getOrDefault(batchKey, 0L)) {
-            return;
+            return false;
         }
 
         LOG.infov("DynamoDB Streams ESM {0}: delivering {1} of {2} record(s) to {3}",
@@ -359,14 +371,14 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
             if ("TooManyRequestsException".equals(e.getErrorCode())) {
                 LOG.infov("DynamoDB Streams ESM {0}: function {1} throttled, shard iterator not advanced",
                         esm.getUuid(), fn.getFunctionName());
-                return;
+                return false;
             }
             throw e;
         }
         if (!exists(esm)) {
             LOG.debugv("DynamoDB Streams ESM {0} was deleted during the invocation, dropping its result",
                     esm.getUuid());
-            return;
+            return false;
         }
 
         CheckpointOutcome outcome = invokeResult.getFunctionError() == null
@@ -375,7 +387,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
 
         if (outcome.lowestFailedIndex() == records.size()) {
             clearBatchState(batchKey);
-            advanceCheckpoint(esm, shardId, outcome.checkpoint());
+            return advanceCheckpoint(esm, shardId, outcome.checkpoint());
         } else if (outcome.lowestFailedIndex() > 0) {
             clearBatchState(batchKey);
 
@@ -446,6 +458,7 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
                         esm.getUuid(), error, currentRetries);
             }
         }
+        return false;
     }
 
     private record CheckpointOutcome(String checkpoint, int lowestFailedIndex) {}
@@ -614,12 +627,14 @@ public class DynamoDbStreamsEventSourcePoller implements Resettable {
         return item;
     }
 
-    private synchronized void advanceCheckpoint(EventSourceMapping esm, String shardId, String newestSeq) {
+    /** @return whether the checkpoint moved; it does not once the mapping is stopped or deleted */
+    private synchronized boolean advanceCheckpoint(EventSourceMapping esm, String shardId, String newestSeq) {
         if (isStopped(esm)) {
-            return;
+            return false;
         }
         esm.getShardSequenceNumbers().put(shardId, newestSeq);
         esmStore.saveForAccount(esm.getAccountId(), esm);
+        return true;
     }
 
     private boolean isStopped(EventSourceMapping esm) {
