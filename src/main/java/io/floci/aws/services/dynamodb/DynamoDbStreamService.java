@@ -41,7 +41,7 @@ public class DynamoDbStreamService {
 
     /** The first shard of every stream, which a stream with one shard that never rolls over keeps for good. */
     static final String SHARD_ID = shardId(1, 0);
-    /** The most records a stream keeps across its shards; the oldest goes first. */
+    /** The most records a stream keeps across its shards when retention is off; the oldest goes first. */
     static final int MAX_RECORDS = 1000;
     /** How long a shard iterator can be used when iterator expiry is on, as on AWS. */
     static final Duration ITERATOR_LIFETIME = Duration.ofMinutes(15);
@@ -277,7 +277,8 @@ public class DynamoDbStreamService {
             shard.records.addLast(record);
             shard.lastSequence = record.getSequenceNumber();
             state.retained++;
-            while (state.retained > MAX_RECORDS) {
+            // With retention on, records leave only by age, as on AWS.
+            while (!settings.retention() && state.retained > MAX_RECORDS) {
                 state.trimOldest();
             }
         }
@@ -621,7 +622,7 @@ public class DynamoDbStreamService {
     private static final class StreamState {
         final List<Shard> shards = new ArrayList<>();
         final AtomicLong counter;
-        /** Records kept across every shard, held to {@link #MAX_RECORDS}. */
+        /** Records kept across every shard, held to {@link #MAX_RECORDS} when retention is off. */
         int retained;
 
         StreamState(AtomicLong counter) {
