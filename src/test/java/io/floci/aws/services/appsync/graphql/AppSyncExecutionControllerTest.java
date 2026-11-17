@@ -368,4 +368,24 @@ class AppSyncExecutionControllerTest {
         // The token stops working the moment the operation returns, so a late callback resolves nothing.
         assertTrue(callbackSessions.find(token.get()).isEmpty());
     }
+
+    @Test
+    void theClientsHeadersReachTheResolversWithLowercasedNames() {
+        planTwoFieldsOneWithAResolver();
+        when(fieldAuthorizationPlanner.planDenyFields(any(), any())).thenReturn(List.of());
+        MultivaluedHashMap<String, String> sent = new MultivaluedHashMap<>();
+        sent.add("Origin", "https://app.example.com");
+        when(jsonHeaders.getRequestHeaders()).thenReturn(sent);
+        when(jsonHeaders.getHeaderString("Origin")).thenReturn("https://app.example.com");
+        AtomicReference<Map<String, String>> seen = new AtomicReference<>();
+        when(sidecarClient.execute(any(), any(), any(), any(), any(), any(), any())).thenAnswer(call -> {
+            GraphqlSidecarClient.ResolveSpec spec = call.getArgument(6);
+            seen.set(callbackSessions.find(spec.token()).orElseThrow().headers());
+            return Map.of("data", Map.of());
+        });
+
+        controller.execute("api-1", jsonHeaders, "{\"query\":\"{ getMessages }\"}");
+
+        assertEquals(Map.of("origin", "https://app.example.com"), seen.get());
+    }
 }

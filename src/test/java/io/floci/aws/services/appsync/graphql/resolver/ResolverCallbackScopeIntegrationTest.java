@@ -61,7 +61,8 @@ class ResolverCallbackScopeIntegrationTest {
             return new ResolverOutcome("delivered", null, List.of());
         });
         Map<String, Object> roleIdentity = Map.of("userArn", "role-identity");
-        try (ResolverCallbackSessions.Session session = sessions.open(API, roleIdentity, "IAM Authorization", ACCOUNT, REGION)) {
+        try (ResolverCallbackSessions.Session session =
+                     sessions.open(API, roleIdentity, "IAM Authorization", ACCOUNT, REGION, Map.of())) {
             given().contentType("application/json").header("Authorization", "Bearer " + session.token())
                     .body(BODY).post("/_floci/appsync/resolve")
                     .then().statusCode(200).body("results[0].data", equalTo("delivered"));
@@ -77,7 +78,8 @@ class ResolverCallbackScopeIntegrationTest {
             assertEquals(ACCOUNT + "|" + REGION + "|aws-cn", scope());
             throw new AwsException("ConcurrentModificationException", "reloading", 409);
         });
-        try (ResolverCallbackSessions.Session session = sessions.open(API, Map.of(), "IAM Authorization", ACCOUNT, REGION)) {
+        try (ResolverCallbackSessions.Session session =
+                     sessions.open(API, Map.of(), "IAM Authorization", ACCOUNT, REGION, Map.of())) {
             RequestScopes.runAs("725018800004", "eu-west-1", () -> {
                 assertEquals(200, resource.resolve("Bearer " + session.token(), BODY).getStatus());
                 assertEquals("725018800004|eu-west-1|aws", scope());

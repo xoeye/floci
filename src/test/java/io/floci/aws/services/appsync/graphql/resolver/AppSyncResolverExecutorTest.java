@@ -183,7 +183,24 @@ class AppSyncResolverExecutorTest {
 
     private ResolverInvocation invocation(Map<String, Object> arguments, Object source) {
         return new ResolverInvocation(API_ID, "Query", "getThing", arguments, source,
-                null, null, null, null, null);
+                null, null, null, null, null, null);
+    }
+
+    @Test
+    void theResolverSeesTheClientsHeadersAsCtxRequestHeaders() {
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(dataSource("accountDB"));
+        Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
+        resolver.setDataSourceName("accountDB");
+        jsRuntime.script("unit-code", "request", (h, ctx) -> ok(Map.of()));
+        jsRuntime.script("unit-code", "response", (h, ctx) -> ok("done"));
+        invoker.answer = Map.of();
+        ResolverInvocation invocation = new ResolverInvocation(API_ID, "Query", "getThing", Map.of(), null,
+                null, null, null, null, null, Map.of("origin", "https://app.example.com"));
+
+        executor.execute(resolver, invocation);
+
+        assertEquals(Map.of("origin", "https://app.example.com"),
+                ((Map<?, ?>) jsRuntime.contexts.get(0).get("request")).get("headers"));
     }
 
     @Test

@@ -17,11 +17,12 @@ import java.util.Map;
  *
  * @param identity the caller's AppSync identity, or null for an auth mode that has none (API key)
  * @param authType the AppSync auth mode name that authorised the request
+ * @param headers the client's request headers, names lowercased, as {@code ctx.request.headers}
  */
 public record ResolverInvocation(String apiId, String typeName, String fieldName,
                                  Map<String, Object> arguments, Object source, List<Object> path,
                                  Map<String, Object> variables, List<String> selectionSetList,
-                                 Object identity, String authType) {
+                                 Object identity, String authType, Map<String, String> headers) {
 
     public ResolverInvocation {
         // Normalised here rather than at each read: the callback may omit any of them, and every
@@ -29,6 +30,7 @@ public record ResolverInvocation(String apiId, String typeName, String fieldName
         arguments = copyOf(arguments);
         variables = copyOf(variables);
         selectionSetList = copyOf(selectionSetList);
+        headers = copyOf(headers);
         path = path == null || path.isEmpty() ? List.of(fieldName) : copyOf(path);
     }
 

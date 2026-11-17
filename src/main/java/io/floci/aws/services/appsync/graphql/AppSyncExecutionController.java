@@ -181,7 +181,7 @@ public class AppSyncExecutionController {
                 }
                 List<DenyField> denyFields = fieldAuthorizationPlanner.planDenyFields(plan, authContext);
                 Map<String, Object> rawResult = executeQuery(apiId, preparedSdl, scalars, parsed,
-                        denyFields, plan, authContext);
+                        denyFields, plan, authContext, resolverHeaders(headers));
                 return Response.ok(errorFormatter.format(rawResult)).type(MediaType.APPLICATION_JSON).build();
             } catch (AppSyncTransportException e) {
                 return graphqlError(e.getHttpStatus(), e.getErrorType(), e.getMessage());
@@ -214,7 +214,9 @@ public class AppSyncExecutionController {
         if (!denied.isEmpty()) {
             throw new AwsException("AccessDeniedException", "The target role may not access every selected field.", 403);
         }
-        return executeQuery(apiId, preparedSdl, scalars, new ParsedRequest(query, variables, null), denied, plan, auth);
+        // A service mutation has no client request, so its resolvers see no headers.
+        return executeQuery(apiId, preparedSdl, scalars, new ParsedRequest(query, variables, null), denied, plan, auth,
+                Map.of());
     }
 
     /**
@@ -224,7 +226,8 @@ public class AppSyncExecutionController {
      */
     private Map<String, Object> executeQuery(String apiId, String preparedSdl, Map<String, String> scalars,
                                              ParsedRequest parsed, List<DenyField> denyFields,
-                                             PlanResult plan, AppSyncAuthContext authContext) {
+                                             PlanResult plan, AppSyncAuthContext authContext,
+                                             Map<String, String> requestHeaders) {
         CallbackPlan callbacks = resolverBackedFields(apiId, plan, denyFields);
         if (callbacks.fields().isEmpty()) {
             return sidecarClient.execute(preparedSdl, scalars, parsed.query(), parsed.variables(),
@@ -232,7 +235,7 @@ public class AppSyncExecutionController {
         }
         try (ResolverCallbackSessions.Session session =
                      callbackSessions.open(apiId, authContext.identity(), authContext.authType(),
-                             authContext.accountId(), authContext.region())) {
+                             authContext.accountId(), authContext.region(), requestHeaders)) {
             ResolveSpec resolve = new ResolveSpec(reachableEndpoint.baseUrl() + "/_floci/appsync/resolve",
                     session.token(), callbacks.fields(), callbacks.maxBatch());
             Map<String, Object> result = sidecarClient.execute(preparedSdl, scalars, parsed.query(),
@@ -415,6 +418,13 @@ public class AppSyncExecutionController {
                 map.put(name, headers.getHeaderString(name));
             }
         }
+        return map;
+    }
+
+    /** The client's headers as AppSync gives them to resolvers in {@code ctx.request.headers}: names lowercased. */
+    private Map<String, String> resolverHeaders(HttpHeaders headers) {
+        Map<String, String> map = new LinkedHashMap<>();
+        headerMap(headers).forEach((name, value) -> map.put(name.toLowerCase(Locale.ROOT), value));
         return map;
     }
 
