@@ -105,6 +105,20 @@ class DynamoDbStreamLifecycleTest {
     }
 
     @Test
+    void withRetentionOnAStreamKeepsRecordsPastTheRecordCap() {
+        DynamoDbStreamService streams = streams(RETENTION);
+        String streamArn = enable(streams);
+        for (int i = 0; i <= DynamoDbStreamService.MAX_RECORDS; i++) {
+            put(streams, "r-" + i);
+        }
+
+        List<String> kept = keys(readAll(streams, streamArn, DynamoDbStreamService.SHARD_ID));
+
+        assertEquals(DynamoDbStreamService.MAX_RECORDS + 1, kept.size());
+        assertEquals("r-0", kept.getFirst());
+    }
+
+    @Test
     void anIteratorOpenedOnAShardThatTrimmingEmptiedReadsWhatComesNext() {
         DynamoDbStreamService streams = streams(RETENTION);
         String streamArn = enable(streams);

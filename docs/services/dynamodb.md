@@ -169,17 +169,18 @@ not age out. Four settings bring a stream closer to AWS. Each is off unless you 
   it is returned, as AWS does, and `GetRecords` then answers `ExpiredIteratorException`. The
   `NextShardIterator` of each `GetRecords` call has 15 minutes of its own.
 - `FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED` trims records 24 hours after they are written and
-  drops a closed shard 24 hours after it closes, as AWS does. `GetShardIterator` then refuses a
-  sequence number the shard has trimmed with `TrimmedDataAccessException`, and one it never held with
-  `ValidationException`, as AWS does.
+  drops a closed shard 24 hours after it closes, as AWS does. The stream then keeps every record for
+  those 24 hours instead of its latest 1,000. `GetShardIterator` refuses a sequence number the shard
+  has trimmed with `TrimmedDataAccessException`, and one it never held with `ValidationException`, as
+  AWS does.
 
 Disabling a stream closes its open shards, each with an `EndingSequenceNumber`, and what they hold
 stays readable. A `GetRecords` call that reaches the end of a closed shard returns no
 `NextShardIterator`. `GetShardIterator` for a shard the stream does not have answers
-`ResourceNotFoundException`. The 1,000-record limit is for the whole stream: the oldest record goes
-first, whichever shard holds it. A closed shard that holds no records is dropped once the shard that
-replaced it has closed too, so a stream that rolls over lists at most two generations of shards while
-idle, and otherwise only the shards that still hold records.
+`ResourceNotFoundException`. Without retention, the 1,000-record limit is for the whole stream: the
+oldest record goes first, whichever shard holds it. A closed shard that holds no records is dropped
+once the shard that replaced it has closed too, so a stream that rolls over lists at most two
+generations of shards while idle, and otherwise only the shards that still hold records.
 
 ## Time to Live
 
@@ -311,7 +312,7 @@ region is rejected.
 | `FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_COUNT` | `1` | Open shards in each stream. See [Shards, iterators and retention](#shards-iterators-and-retention) |
 | `FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_ROLLOVER_SECONDS` | `0` | Seconds a stream shard stays open before a child shard takes its keys. `0` keeps shards open |
 | `FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED` | `false` | Expire stream shard iterators 15 minutes after they are returned, as AWS does |
-| `FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED` | `false` | Keep stream records, and shards once closed, for 24 hours, as AWS does |
+| `FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED` | `false` | Keep stream records, and shards once closed, for 24 hours, as AWS does, with no 1,000-record limit |
 | `FLOCI_SERVICES_DYNAMODB_BACKEND` | `native` | Engine behind the DynamoDB API: `native` or `local`, case-insensitive. Any other value fails startup. See [DynamoDB Local backend](#dynamodb-local-backend) |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | *(none)* | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |
