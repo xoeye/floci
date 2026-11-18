@@ -19,6 +19,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
@@ -29,6 +30,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.SecurityGroupFirewallManager;
 import io.floci.aws.services.ec2.SecurityGroupNftCompiler;
@@ -42,6 +44,7 @@ import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.ContainerDependency;
 import io.floci.aws.services.ecs.model.ContainerOverride;
 import io.floci.aws.services.ecs.model.EcsTask;
+import io.floci.aws.services.ecs.model.EcsTaskNetworkInterface;
 import io.floci.aws.services.ecs.model.EfsVolumeConfiguration;
 import io.floci.aws.services.ecs.model.FirelensConfiguration;
 import io.floci.aws.services.ecs.model.KeyValuePair;
@@ -151,6 +154,9 @@ public class EcsContainerManager {
     private final EcsCredentialsProxy credentialsProxy;
     private final EcsTaskLinkLocalAddresses linkLocalAddresses;
     private final EfsService efsService;
+    // Optional so the constructors stay as they are; a manager built without it records no ENI.
+    @Inject
+    EcsTaskNetworkLedger taskNetworkLedger;
     // Stamped as RUN_LABEL on every container this process creates, so a sweep can tell its own apart.
     private final String runId = UUID.randomUUID().toString();
     private final ContainerReconciler containerReconciler;
@@ -1140,6 +1146,7 @@ public class EcsContainerManager {
         } catch (AwsException e) {
             throw asEcsNetworkRejection(e);
         }
+        recordTaskEni(task, region, eni.getNetworkInterfaceId());
         // A running task holds its interface, so EC2 must report it "in-use" rather than
         // "available" as a fresh one starts out, and must refuse to delete it under the task.
         ec2Service.holdNetworkInterfaceForService(region, eni.getNetworkInterfaceId());
@@ -1235,13 +1242,56 @@ public class EcsContainerManager {
             firewallManager.unregister(eniId);
         }
         try {
-            // EC2 refuses to delete an interface that is in use, and attachTaskNetwork marked
-            // this one as held by the task, so the hold goes before the interface does.
-            ec2Service.releaseNetworkInterfaceFromService(region, eniId);
-            ec2Service.deleteNetworkInterface(region, eniId);
+            freeTaskEni(region, eniId);
+            forgetTaskEni(task.getTaskArn());
         } catch (RuntimeException e) {
             LOG.debugv("Could not delete the ENI {0} of task {1}: {2}",
                     eniId, task.getTaskArn(), e.getMessage());
+        }
+    }
+
+    /** Records a task's new ENI at once, so a process that dies before the task stops leaves it to the next startup. */
+    private void recordTaskEni(EcsTask task, String region, String eniId) {
+        if (taskNetworkLedger != null && task.getTaskArn() != null) {
+            taskNetworkLedger.record(task.getTaskArn(), region, eniId);
+        }
+    }
+
+    private void forgetTaskEni(String taskArn) {
+        if (taskNetworkLedger != null && taskArn != null) {
+            taskNetworkLedger.forget(taskArn);
+        }
+    }
+
+    /** Deletes a task ENI. EC2 refuses to delete an interface in use, so the task's hold goes first. */
+    private void freeTaskEni(String region, String eniId) {
+        ec2Service.releaseNetworkInterfaceFromService(region, eniId);
+        ec2Service.deleteNetworkInterface(region, eniId);
+    }
+
+    /**
+     * Deletes every task ENI ECS recorded, in every account. Only for startup, when ECS holds no
+     * task at all: task state is memory-only, so each recorded interface belongs to a task of a
+     * previous run and would otherwise hold its subnet address for good. Interfaces ECS did not
+     * record are never touched, including task ENIs a Floci version without the record created.
+     */
+    public void releaseRecordedTaskNetworks() {
+        if (taskNetworkLedger == null || ec2Service == null) {
+            return;
+        }
+        for (AccountAwareStorageBackend.AccountEntry<EcsTaskNetworkInterface> entry
+                : taskNetworkLedger.allAccounts()) {
+            EcsTaskNetworkInterface eni = entry.value();
+            try {
+                RequestScopes.runAs(entry.accountId(), eni.region(),
+                        () -> freeTaskEni(eni.region(), eni.networkInterfaceId()));
+                LOG.infov("Deleted the ENI {0} of ECS task {1} left by a previous run",
+                        eni.networkInterfaceId(), entry.key());
+            } catch (RuntimeException e) {
+                LOG.debugv("Could not delete the ENI {0} of ECS task {1} left by a previous run: {2}",
+                        eni.networkInterfaceId(), entry.key(), e.getMessage());
+            }
+            taskNetworkLedger.forget(entry.accountId(), entry.key());
         }
     }
 
@@ -1375,6 +1425,7 @@ public class EcsContainerManager {
         if (eni == null) {
             eni = ec2Service.createNetworkInterface(region, awsvpc.getSubnets().getFirst(),
                     "ECS task " + task.getTaskArn(), null, List.of(), awsvpc.getSecurityGroups(), List.of());
+            recordTaskEni(task, region, eni.getNetworkInterfaceId());
             ec2Service.holdNetworkInterfaceForService(region, eni.getNetworkInterfaceId());
         }
         String eniId = eni.getNetworkInterfaceId();
@@ -1417,8 +1468,8 @@ public class EcsContainerManager {
             if (namespace != null) {
                 lifecycleManager.removeIfExists(namespace.helperId());
             }
-            ec2Service.releaseNetworkInterfaceFromService(region, eniId);
-            ec2Service.deleteNetworkInterface(region, eniId);
+            freeTaskEni(region, eniId);
+            forgetTaskEni(task.getTaskArn());
             throw e;
         }
     }

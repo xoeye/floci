@@ -366,12 +366,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * Clears what the tasks of a previous run left behind, before the scheduler starts their
      * replacements. Task state is memory-only, so a restarted Floci knows no task, yet a run that
-     * ended without a graceful shutdown leaves its task containers serving, and even a graceful one
-     * leaves their load balancer targets and Cloud Map instances registered. Left alone, each
-     * service would serve from its replacements and a task nothing manages, and a dead task's
-     * target would follow its address to whichever container Docker hands it to next. Only what
-     * the registrars recorded registering is released, never a target or instance registered by
-     * hand. A container Docker would not remove is retried by {@link #leftoverContainersCleared()}
+     * ended without a graceful shutdown leaves its task containers serving and, since EC2 persists
+     * them, its awsvpc tasks' ENIs holding their subnet addresses, and even a graceful one leaves
+     * their load balancer targets and Cloud Map instances registered. Left alone, each service would
+     * serve from its replacements and a task nothing manages, a dead task's target would follow its
+     * address to whichever container Docker hands it to next, and every such restart would take
+     * another address from each awsvpc service's subnet. Only what ECS recorded is released, never a
+     * target, instance or interface made by hand. A container Docker would not remove is retried by {@link #leftoverContainersCleared()}
      * before each task launch, and no task starts until it is gone. With
      * {@code reconcile-containers-on-startup} off, containers are left alone and tasks start at once.
      */
@@ -386,6 +387,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (discoveryRegistrar != null) {
             discoveryRegistrar.releaseRecordedInstances();
         }
+        containerManager.releaseRecordedTaskNetworks();
     }
 
     private void scheduleReconciliation(ScheduledExecutorService scheduler) {
