@@ -730,6 +730,15 @@ nothing manages:
   so one cut short by the process dying is still released. A target already in its group when a
   task starts is recorded as the task's own, since its address and port reach only that task, so
   it is deregistered when the task stops, as ECS does on AWS.
+- Every awsvpc task ENI a previous run's tasks still held is deleted. A graceful shutdown deletes
+  them once it has stopped the task containers, but a run that ends before then (SIGKILL, OOM, a
+  stop timeout such as `docker stop`'s default 10 seconds expiring mid-drain) leaves them in EC2's
+  persisted state, each holding a subnet address that no task will release, until the subnet has
+  none left and task launches fail with `InsufficientFreeAddressesInSubnet`. ECS records each task
+  ENI when it creates it and deletes exactly those, so an interface created through the EC2 API
+  stays, whatever its description. Task ENIs a Floci version without the record created are not
+  recognised. They report `in-use`, so `DeleteNetworkInterface` refuses them, and a reset of the
+  persisted EC2 state removes them.
 - Registrations no ECS task recorded, as those a Floci version without the record made, are
   removed once they would misroute: when a task starts, each registration that points at it and
   that no running task recorded is deregistered from the target groups and Cloud Map services an
