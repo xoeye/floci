@@ -682,9 +682,7 @@ public class AppSyncResolverExecutor {
 
         private Map<String, Object> requestContext() {
             Map<String, Object> request = new LinkedHashMap<>();
-            // The callback does not carry the client's headers, so ctx.request.headers is empty
-            // rather than wrong. authType it does, and a resolver keying off it behaves as on AWS.
-            request.put("headers", Map.of());
+            request.put("headers", invocation.headers());
             request.put("authType", invocation.authType());
             request.put("domainName", null);
             return request;

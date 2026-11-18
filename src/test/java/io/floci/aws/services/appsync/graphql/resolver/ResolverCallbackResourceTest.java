@@ -38,7 +38,8 @@ class ResolverCallbackResourceTest {
     @BeforeEach
     void setUp() {
         resource = new ResolverCallbackResource(sessions, executor, new ObjectMapper());
-        session = sessions.open(API_ID, Map.of("sub", "u-1"), "AWS_IAM", "000000000000", "us-east-1");
+        session = sessions.open(API_ID, Map.of("sub", "u-1"), "AWS_IAM", "000000000000", "us-east-1",
+                Map.of("origin", "https://app.example.com"));
     }
 
     private String body(String... invocations) {
@@ -104,6 +105,7 @@ class ResolverCallbackResourceTest {
         // beyond its token, so it cannot be trusted to state who the caller is.
         assertEquals(Map.of("sub", "u-1"), invocation.identity());
         assertEquals("AWS_IAM", invocation.authType());
+        assertEquals(Map.of("origin", "https://app.example.com"), invocation.headers());
     }
 
     @Test

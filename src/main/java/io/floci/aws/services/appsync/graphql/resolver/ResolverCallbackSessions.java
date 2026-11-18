@@ -27,7 +27,8 @@ public class ResolverCallbackSessions {
     private final Map<String, Session> sessions = new ConcurrentHashMap<>();
 
     /**
-     * One operation's callback state: who it runs as, and the errors its resolvers appended.
+     * One operation's callback state: who it runs as, the client's request headers, and the errors its
+     * resolvers appended.
      *
      * <p>Closing it is what makes the token stop working, so callers close in a finally: a session
      * left behind would keep answering callbacks for an operation that already returned.
@@ -40,10 +41,11 @@ public class ResolverCallbackSessions {
         private final String authType;
         private final String accountId;
         private final String region;
+        private final Map<String, String> headers;
         private final List<AppSyncResolverError> appendedErrors = new CopyOnWriteArrayList<>();
 
         private Session(Map<String, Session> owner, String token, String apiId, Object identity, String authType,
-                        String accountId, String region) {
+                        String accountId, String region, Map<String, String> headers) {
             this.owner = owner;
             this.token = token;
             this.apiId = apiId;
@@ -51,6 +53,7 @@ public class ResolverCallbackSessions {
             this.authType = authType;
             this.accountId = accountId;
             this.region = region;
+            this.headers = headers == null ? Map.of() : headers;
         }
 
         public String token() {
@@ -77,6 +80,11 @@ public class ResolverCallbackSessions {
             return region;
         }
 
+        /** The client's request headers, names lowercased, for {@code ctx.request.headers}. */
+        public Map<String, String> headers() {
+            return headers;
+        }
+
         /** Errors from {@code util.appendError}, which are reported beside the data rather than instead of it. */
         public void appendErrors(List<AppSyncResolverError> errors) {
             if (errors != null && !errors.isEmpty()) {
@@ -94,11 +102,12 @@ public class ResolverCallbackSessions {
         }
     }
 
-    public Session open(String apiId, Object identity, String authType, String accountId, String region) {
+    public Session open(String apiId, Object identity, String authType, String accountId, String region,
+                        Map<String, String> headers) {
         byte[] bytes = new byte[TOKEN_BYTES];
         random.nextBytes(bytes);
         String token = Base64Url.encode(bytes);
-        Session session = new Session(sessions, token, apiId, identity, authType, accountId, region);
+        Session session = new Session(sessions, token, apiId, identity, authType, accountId, region, headers);
         sessions.put(token, session);
         return session;
     }

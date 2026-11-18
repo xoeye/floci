@@ -450,8 +450,9 @@ request / data source / response, then its `response()` as the after step.
   no `response()` has nothing to make that decision, so there the error fails the field.
 
 `ctx` carries `arguments` / `args`, `source`, `stash`, `prev`, `identity`, `request.authType`,
-`info` (`fieldName`, `parentTypeName`, `variables`, `selectionSetList`) and `env` (the API's
-environment variables). `ctx.request.headers` is empty: the GraphQL context does not carry them.
+`request.headers` (the client's HTTP request headers, names lowercased; empty for an EventBridge
+target), `info` (`fieldName`, `parentTypeName`, `variables`, `selectionSetList`) and `env` (the
+API's environment variables).
 
 ### Data sources
 

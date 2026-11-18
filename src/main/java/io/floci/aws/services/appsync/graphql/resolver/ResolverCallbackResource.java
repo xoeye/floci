@@ -122,7 +122,8 @@ public class ResolverCallbackResource {
                 asMap(node.get("variables")),
                 asStrings(node.get("selectionSetList")),
                 session.identity(),
-                session.authType());
+                session.authType(),
+                session.headers());
     }
 
     /** What graphql-java's own property fetcher would have read off the parent value. */
